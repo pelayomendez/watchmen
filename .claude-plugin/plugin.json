@@ -1,7 +1,11 @@
 {
-  "name": "nightwatch",
+  "name": "watchmen",
   "version": "0.1.0",
   "description": "A long-lived companion session: a calm observer that keeps the watch over your work across sessions and brings you only the decisions.",
-  "author": { "name": "Pelayo Méndez", "url": "https://github.com/pelayomendez" },
-  "license": "MIT"
+  "author": {
+    "name": "Pelayo Méndez",
+    "url": "https://github.com/pelayomendez"
+  },
+  "license": "MIT",
+  "types": "./types/index.d.ts"
 }

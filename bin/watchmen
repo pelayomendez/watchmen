@@ -1,24 +1,29 @@
 #!/usr/bin/env bash
-# Start the nightwatch: one named, long-lived Claude Code session that keeps the watch over the
-# work in the current directory. Other sessions reach it as "nightwatch".
+# Start the watchmen: one named, long-lived Claude Code session that keeps the watch over the
+# work in the current directory. Other sessions reach it as "watchmen".
 #
-# Usage: nightwatch [first prompt]   (default: "Begin the watch.")
+# Usage: watchmen [first prompt]   (default: "Begin the watch.")
 
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")")/.." && pwd)"
+# Resolve a symlinked launcher by hand: readlink -f is missing on older macOS.
+self="${BASH_SOURCE[0]}"
+while [ -L "$self" ]; do
+  target="$(readlink "$self")"
+  case "$target" in /*) self="$target" ;; *) self="$(dirname "$self")/$target" ;; esac
+done
+ROOT="$(cd "$(dirname "$self")/.." && pwd)"
 
-# The ambient-companion skill is the watch's process. Look where its two install routes put it,
-# then in a local clone of pelayo-skills.
+# The ambient-companion skill is the watch's process. Look where its install routes put it;
+# WATCHMEN_SKILL points anywhere else.
 find_skill() {
   local candidates=(
-    "${NIGHTWATCH_SKILL:-}"
+    "${WATCHMEN_SKILL:-}"
     "$HOME/.claude/skills/ambient-companion/SKILL.md"
     "$HOME/.agents/skills/ambient-companion/SKILL.md"
-    "$HOME/Development/pelayomendez/pelayo-skills/skills/productivity/ambient-companion/SKILL.md"
   )
   local found
-  found=$(ls -d "$HOME"/.claude/plugins/cache/*/pelayo-skills/*/skills/productivity/ambient-companion/SKILL.md 2>/dev/null | tail -1 || true)
+  found=$(ls -td "$HOME"/.claude/plugins/cache/*/pelayo-skills/*/skills/productivity/ambient-companion/SKILL.md 2>/dev/null | head -1 || true)
   [ -n "$found" ] && candidates+=("$found")
   for path in "${candidates[@]}"; do
     [ -n "$path" ] && [ -f "$path" ] && { echo "$path"; return; }
@@ -27,11 +32,10 @@ find_skill() {
 
 skill=$(find_skill || true)
 if [ -z "$skill" ]; then
-  echo "nightwatch: ambient-companion skill not found; install it with:" >&2
+  echo "watchmen: ambient-companion skill not found; install it with:" >&2
   echo "  npx skills@latest add pelayomendez/pelayo-skills" >&2
 fi
 
-mkdir -p .companion
 handoff=$(ls .companion/handoff-*.md 2>/dev/null | sort | tail -1 || true)
 
 if [ -n "$skill" ]; then
@@ -50,12 +54,13 @@ $skill_line
 
 $handoff_line"
 
-if [ -n "${NIGHTWATCH_PRINT_BRIEFING:-}" ]; then
+if [ -n "${WATCHMEN_PRINT_BRIEFING:-}" ]; then
   printf '%s\n' "$briefing"
   exit 0
 fi
 
-export NIGHTWATCH=1
-export NIGHTWATCH_SKILL="$skill"
+mkdir -p .companion
+export WATCHMEN=1
+export WATCHMEN_SKILL="$skill"
 
-exec claude --name nightwatch --plugin-dir "$ROOT" --append-system-prompt "$briefing" "${@:-Begin the watch.}"
+exec claude --name watchmen --plugin-dir "$ROOT" --append-system-prompt "$briefing" "${@:-Begin the watch.}"
