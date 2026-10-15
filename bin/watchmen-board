@@ -1,0 +1,104 @@
+#!/usr/bin/env node
+// A read-only view of the watch board for a terminal pane of its own: it redraws whenever
+// .companion/board.json changes and never writes anything.
+//
+// Usage: watchmen-board [path/to/board.json | workspace dir] [--once]
+
+import { existsSync, readFileSync, statSync, watch } from 'node:fs'
+import { homedir } from 'node:os'
+import { basename, dirname } from 'node:path'
+
+import { readBoard, render, resolveBoardPath, wantsColor } from './board-render.mjs'
+
+const args = process.argv.slice(2)
+const isOnce = args.includes('--once')
+const { file } = resolveBoardPath({
+  arg: args.find(arg => arg !== '--once'),
+  env: process.env,
+  cwd: process.cwd(),
+  home: homedir(),
+  isDir: path => {
+    try {
+      return statSync(path).isDirectory()
+    } catch {
+      return false
+    }
+  },
+  exists: existsSync,
+  read: path => readFileSync(path, 'utf8'),
+})
+const workspace = basename(dirname(dirname(file)))
+const color = wantsColor(process.env) && process.stdout.isTTY === true
+const isLive = !isOnce && process.stdout.isTTY === true
+
+let state
+let seen = ''
+
+function load() {
+  let text
+  let mtimeMs = 0
+  try {
+    text = readFileSync(file, 'utf8')
+    mtimeMs = statSync(file).mtimeMs
+  } catch (error) {
+    if (error.code !== 'ENOENT') text = `\0unreadable: ${error.message}`
+  }
+  const stamp = text === undefined ? 'missing' : `${mtimeMs}:${text.length}:${text}`
+  if (stamp === seen) return false
+  seen = stamp
+  state = readBoard(text, mtimeMs, state)
+  return true
+}
+
+function draw() {
+  const lines = render(state, { columns: process.stdout.columns || 80, now: Date.now(), color, workspace })
+  const rows = process.stdout.rows || lines.length
+  const body = (isLive ? lines.slice(0, rows) : lines).join('\n')
+  process.stdout.write(isLive ? `\x1b[H\x1b[2J${body}` : `${body}\n`)
+}
+
+load()
+if (!isLive) {
+  draw()
+  process.exit(0)
+}
+
+// The alternate screen keeps the shell's scrollback; the cursor is hidden while the view runs.
+process.stdout.write('\x1b[?1049h\x1b[?25l')
+function restore() {
+  process.stdout.write('\x1b[?25h\x1b[?1049l')
+}
+for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+  process.on(signal, () => {
+    restore()
+    process.exit(0)
+  })
+}
+process.on('exit', restore)
+
+let pending
+function refresh(force = false) {
+  clearTimeout(pending)
+  pending = setTimeout(() => {
+    if (load() || force) draw()
+  }, 50)
+}
+
+// Saves replace board.json through a temp file and a rename, so the directory is watched rather
+// than the file; a two-second poll covers a directory that appears later or a watch that misses.
+function watchDir() {
+  try {
+    return watch(dirname(file), () => refresh())
+  } catch {
+    return undefined
+  }
+}
+let watcher = watchDir()
+setInterval(() => {
+  watcher ??= watchDir()
+  refresh()
+}, 2_000)
+// The "changed … ago" times age even when nothing is saved.
+setInterval(() => refresh(true), 30_000)
+process.stdout.on('resize', () => refresh(true))
+draw()

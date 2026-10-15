@@ -3,6 +3,8 @@
 # work in the current directory. Other sessions reach it as "watchmen".
 #
 # Usage: watchmen [first prompt]   (default: "Begin the watch.")
+#        watchmen board [path]     the read-only board viewer (bin/watchmen-board)
+#        watchmen board [path]       the read-only board viewer
 
 set -euo pipefail
 
@@ -13,6 +15,12 @@ while [ -L "$self" ]; do
   case "$target" in /*) self="$target" ;; *) self="$(dirname "$self")/$target" ;; esac
 done
 ROOT="$(cd "$(dirname "$self")/.." && pwd)"
+
+# `watchmen board [path]`: the read-only board viewer, for a pane or tab of its own.
+if [ "${1:-}" = "board" ]; then
+  shift
+  exec node "$ROOT/bin/watchmen-board" "$@"
+fi
 
 # The ambient-companion skill is the watch's process. Look where its install routes put it;
 # WATCHMEN_SKILL points anywhere else.
@@ -60,6 +68,9 @@ if [ -n "${WATCHMEN_PRINT_BRIEFING:-}" ]; then
 fi
 
 mkdir -p .companion
+# Record where the watch is kept, so a board viewer opened in any herdr tab finds this board.
+state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/watchmen"
+mkdir -p "$state_dir" && printf '%s\n' "$PWD" > "$state_dir/current"
 export WATCHMEN=1
 export WATCHMEN_SKILL="$skill"
 
