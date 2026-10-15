@@ -113,6 +113,8 @@ export function render(state, { columns, now, color, workspace, isStale = false 
       const when = typeof one.changedAt === 'number' ? ` · ${ago(now - one.changedAt)}` : ''
       line(`${mark} ${kind}${one.title}${note}${when}`, one.isChanged ? 'bold' : undefined, '  ')
       if (one.isAwaitingApproval === true) {
+        // The exact command first, cleaned like every other line, then how to approve it.
+        if (Array.isArray(one.check?.argv)) line(`would run: ${JSON.stringify(one.check.argv)}`, 'yellow', '    ')
         const hash = typeof one.approvalHash === 'string' ? ` ${one.approvalHash}` : ''
         line(`awaiting approval: /watchmen approve ${one.id}${hash}`, 'yellow', '    ')
       }

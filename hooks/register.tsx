@@ -4,6 +4,7 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { Item, Watch } from '../types'
 import {
   applyToBoard,
+  approvalLines,
   attempt,
   changeReport,
   drop,
@@ -88,7 +89,7 @@ async function approvalKey($: EngineInterface, argv: readonly string[]): Promise
  * so a command changed after they read it no longer matches.
  */
 async function shortHash($: EngineInterface, argv: readonly string[]): Promise<string> {
-  return (await commandHash($, argv)).slice(0, 8)
+  return (await commandHash($, argv)).slice(0, 16)
 }
 
 async function isApproved($: EngineInterface, argv: readonly string[]): Promise<boolean> {
@@ -117,6 +118,20 @@ async function writeBoard($: EngineInterface) {
   }
 }
 
+/** The newest board.json.<time>.bak, by its time, if there is one. */
+export function newestBackupOf(names: readonly string[]): string | undefined {
+  return names
+    .map(name => ({ name, at: /^board\.json\.([0-9]+)\.bak$/.exec(name)?.[1] }))
+    .filter((one): one is { name: string; at: string } => one.at !== undefined)
+    .sort((a, b) => Number(a.at) - Number(b.at))
+    .at(-1)?.name
+}
+
+async function newestBackup($: EngineInterface): Promise<string | undefined> {
+  const entries = (await $.fs.exists(HANDOFF_DIR)) ? await $.fs.list(HANDOFF_DIR) : []
+  return newestBackupOf(entries.filter(one => one.kind === 'file').map(one => one.name))
+}
+
 /** Loads board.json. One it cannot read is copied to a timestamped .bak and blocks every save. */
 async function loadBoard($: EngineInterface): Promise<string | undefined> {
   if (!(await $.fs.exists(BOARD_FILE))) {
@@ -132,7 +147,9 @@ async function loadBoard($: EngineInterface): Promise<string | undefined> {
   // The board in memory is left as it is: empty at start, and kept when a reload fails. Each
   // unreadable copy gets a backup of its own, so a later failure never replaces an earlier backup.
   const backup = `${BOARD_FILE}.${await $.clock.now()}.bak`
-  if (!(await $.fs.exists(backup))) await $.fs.write(backup, text)
+  const newest = await newestBackup($)
+  const isKept = newest !== undefined && (await $.fs.read(`${HANDOFF_DIR}/${newest}`)) === text
+  if (!isKept && !(await $.fs.exists(backup))) await $.fs.write(backup, text)
   $.ui.toast(
     `board.json could not be read (${parsed.error}). Kept as ${backup}; board.json will not be written over. Fix it and /watchmen reload, or /watchmen reset.`,
     { timeoutMs: 15_000 },
@@ -420,11 +437,16 @@ export const register: Register = on => {
                 {`${LANE_TITLES[lane]} (${inLane.length})`}
               </Text>
               {inLane.length === 0 && <Text dimColor>  —</Text>}
-              {inLane.map(one => (
+              {inLane.flatMap(one => [
                 <Text key={one.id} bold={one.isChanged} dimColor={lane === 'done'}>
                   {fit(`  ${itemLine(one)}`)}
-                </Text>
-              ))}
+                </Text>,
+                ...approvalLines(one).map((text, at) => (
+                  <Text key={`${one.id}-approval-${at}`} color="yellow">
+                    {fit(`    ${text}`)}
+                  </Text>
+                )),
+              ])}
             </Box>
           )
         })}
