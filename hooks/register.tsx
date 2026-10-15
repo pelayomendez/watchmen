@@ -123,7 +123,8 @@ async function runCheck($: EngineInterface, item: Item, now: number) {
   let after: Item[] = []
   await update($, board, items => {
     after = (items ?? []).map(one => {
-      if (one.id !== item.id) return one
+      // Dropped meanwhile, or given another check: this outcome no longer describes the item.
+      if (one.id !== item.id || JSON.stringify(one.check) !== JSON.stringify(item.check)) return one
       const applied = applyCheck(one, outcome, now)
       if (applied.isChanged) changedTitle = one.title
       return applied.item
@@ -260,7 +261,7 @@ export const register: Register = on => {
     }
     const items = await read($, board)
     if (verb === 'brief') return { text: summary(items) }
-    await $.ui.open({ id: PANE, title: PANE_TITLE })
+    await $.ui.open({ id: PANE, title: PANE_TITLE }).catch(() => undefined)
     const { context } = await $.session.usage()
     const lines = [
       summary(items),
