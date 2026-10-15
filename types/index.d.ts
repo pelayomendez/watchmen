@@ -1,4 +1,11 @@
-export type Watch = { handoff?: string; skill?: string; startedAt: number; warned: boolean }
+export type Watch = {
+  handoff?: string
+  skill?: string
+  startedAt: number
+  warned: boolean
+  /** Set when board.json could not be read: the file is not written until the human reloads or resets. */
+  boardError?: string
+}
 
 /** Where an item stands for the human: what needs them, what moves on its own, what waits on others. */
 export type Lane = 'needs-you' | 'moving' | 'waiting' | 'done'
@@ -18,8 +25,14 @@ export type Item = {
   note?: string
   link?: string
   check?: Check
-  /** The check's last output. */
+  /** The check's last output, cut short for display. */
   last?: string
+  /** A hash of the check's whole last output: what a change is detected by. */
+  lastHash?: string
+  /** Why the last check failed; cleared by the next one that succeeds. The note stays the model's. */
+  checkError?: string
+  /** The check's command has not been approved by the human, so it does not run. */
+  isAwaitingApproval?: boolean
   /** When the check last started, so a slow check is not started twice. */
   checkedAt?: number
   /** When the check's output last changed. */

@@ -46,7 +46,9 @@ Items are deliberately loose. An item is a title in a lane, with an optional fre
 | `waiting` | it waits on someone else |
 | `done` | kept until dropped; no longer checked |
 
-Every 15 seconds the plugin runs the checks that are due (each on its own interval: 5 minutes by default, never under 1 minute, never two at once). The first output is the baseline. When a later output differs, the item is marked changed (◆), a toast says so, and the watch calls `board_changes` and triages: it moves the item to its lane with a one-line note. A failing check only writes the failure into the note.
+**A check runs only after you approve it.** A check is a command on your machine, and a board.json in a repo or a prompt-injected `board_track` call could name any command, so each new command waits, marked `⚠ check awaiting approval`, until you type `/watchmen approve <id>` yourself (`/watchmen brief` shows what it would run). Approval is per exact command and workspace, kept across sessions; the model cannot approve.
+
+Every 15 seconds the plugin runs the checks that are due (each on its own interval: 5 minutes by default, never under 1 minute, never two at once). The first output is the baseline. When a later output differs, the item is marked changed (◆), a toast says so, and the watch calls `board_changes` and triages: it moves the item to its lane with a one-line note. A failing check shows `⚠ check failed` beside the item and leaves its note alone. A change is detected on the whole output; only its first 2,000 characters are kept for display.
 
 Tell the watch what to track in plain words ("keep an eye on NRV-123 and MR 42"), and it adds items with `board_track`. Check recipes:
 
@@ -59,14 +61,14 @@ Tell the watch what to track in plain words ("keep an eye on NRV-123 and MR 42")
 | A branch moving | `["git", "ls-remote", "origin", "refs/heads/main"]` |
 | A todo | no check: it stays where you put it |
 
-The model's tools are `board_track`, `board_move`, `board_drop` and `board_changes`. The board is kept in `.companion/board.json`, so the next watch picks it up.
+The model's tools are `board_track`, `board_move`, `board_drop` and `board_changes`. The board is kept in `.companion/board.json` (written through a temp file and a rename), so the next watch picks it up. If the file cannot be read, it is copied to `board.json.bak` and never written over until you fix it and `/watchmen reload`, or start over with `/watchmen reset`.
 
 ## What you see
 
 - **The pane**, `⚛ watchmen`: the lanes with their items, changed ones marked ◆ and bold. It opens by itself beside the transcript in the fullscreen layout; on the main screen, `/watchmen` opens it.
 - **The status line**: `⚛ watchmen · 2 need you · 1 moving · 1 changed · 42% · 3h07`. At 75% context it asks for a handoff before the window fills.
 - **Toasts**: one when an item changes, one when the watch runs long.
-- **`/watchmen`** opens the pane and prints the board; `/watchmen brief` prints it grouped by lane; `/watchmen track <title>` adds a todo to needs-you.
+- **`/watchmen`** opens the pane and prints the board; `/watchmen brief` prints it grouped by lane; `/watchmen track <title>` adds a todo to needs-you; `/watchmen approve <id>` lets an item's check run; `/watchmen reload` and `/watchmen reset` recover from an unreadable board.json.
 
 In [herdr](https://herdr.dev), give the watch its own tab and keep your working sessions in the others.
 

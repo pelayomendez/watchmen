@@ -86,21 +86,68 @@ export function dueChecks(items: readonly Item[], now: number, running: Readonly
 
 export type CheckOutcome = { exitCode: number; stdout: string; stderr: string } | { error: string }
 
+/** What a check's outcome comes to once the watch has hashed a successful output. */
+export type CheckResult = { output: string; hash: string } | { error: string }
+
+/** Reads a process outcome as a result: a non-zero exit is a failure, its first stderr line the reason. */
+export function failureOf(outcome: CheckOutcome): string | undefined {
+  if ('error' in outcome) return outcome.error
+  if (outcome.exitCode === 0) return undefined
+  return (outcome.stderr.trim() || `exit ${outcome.exitCode}`).split('\n')[0]
+}
+
 /**
- * Applies a check's outcome to its item. The first output is the baseline; a later different output
- * marks the item changed. A failure leaves the baseline alone and says so in the note.
+ * Applies a check's result to its item. The first output is the baseline; a later output whose hash
+ * differs marks the item changed. The hash covers the whole output, the stored text only its head.
+ * A failure is kept apart from the note, which is the model's.
  */
-export function applyCheck(item: Item, outcome: CheckOutcome, now: number): { item: Item; isChanged: boolean } {
-  if ('error' in outcome || outcome.exitCode !== 0) {
-    const reason =
-      'error' in outcome ? outcome.error : (outcome.stderr.trim() || `exit ${outcome.exitCode}`).split('\n')[0]
-    return { item: { ...item, note: `check failed: ${reason}`.slice(0, 200) }, isChanged: false }
+export function applyCheck(item: Item, result: CheckResult, now: number): { item: Item; isChanged: boolean } {
+  if ('error' in result) return { item: { ...item, checkError: result.error.slice(0, 200) }, isChanged: false }
+  const { checkError: _, ...rest } = item
+  const last = result.output.slice(0, OUTPUT_LIMIT)
+  if (item.lastHash === undefined || item.lastHash === result.hash) {
+    return { item: { ...rest, last, lastHash: result.hash }, isChanged: false }
   }
-  const output = outcome.stdout.trim().slice(0, OUTPUT_LIMIT)
-  const note = item.note?.startsWith('check failed:') ? undefined : item.note
-  if (item.last === undefined) return { item: { ...item, note, last: output }, isChanged: false }
-  if (output === item.last) return { item: { ...item, note }, isChanged: false }
-  return { item: { ...item, note, last: output, changedAt: now, isChanged: true }, isChanged: true }
+  return { item: { ...rest, last, lastHash: result.hash, changedAt: now, isChanged: true }, isChanged: true }
+}
+
+/**
+ * Applies one check's result to the board. Each call stands alone, so a state update that retries
+ * after a version miss carries nothing over from its earlier attempt. An item dropped meanwhile,
+ * or given another check, is left alone: the result no longer describes it.
+ */
+export function applyToBoard(items: readonly Item[], checked: Item, result: CheckResult, now: number): { items: Item[]; changedTitle?: string } {
+  let changedTitle: string | undefined
+  const after = items.map(one => {
+    if (one.id !== checked.id || JSON.stringify(one.check) !== JSON.stringify(checked.check)) return one
+    const applied = applyCheck(one, result, now)
+    if (applied.isChanged) changedTitle = one.title
+    return applied.item
+  })
+  return { items: after, changedTitle }
+}
+
+/**
+ * Wraps a board change for a state update that may call it more than once: every attempt starts
+ * clean, and the outcome is the last attempt's (the one that landed).
+ */
+export function attempt(fn: (items: Item[]) => Item[]) {
+  let error: string | undefined
+  let after: Item[] = []
+  return {
+    run(items: Item[]): Item[] {
+      error = undefined
+      try {
+        after = fn(items)
+        return after
+      } catch (thrown) {
+        error = thrown instanceof Error ? thrown.message : String(thrown)
+        after = items
+        return items
+      }
+    },
+    outcome: () => ({ error, after }),
+  }
 }
 
 export function counts(items: readonly Item[]): Record<Lane, number> {
@@ -127,7 +174,12 @@ export function itemLine(item: Item): string {
   const mark = item.isChanged ? '◆' : '•'
   const kind = item.kind ? `[${item.kind}] ` : ''
   const note = item.note ? ` — ${item.note}` : ''
-  return `${mark} ${kind}${item.title}${note}`
+  const trouble = item.isAwaitingApproval
+    ? ` ⚠ check awaiting approval: /watchmen approve ${item.id}`
+    : item.checkError
+      ? ` ⚠ check failed: ${item.checkError}`
+      : ''
+  return `${mark} ${kind}${item.title}${note}${trouble}`
 }
 
 /** The board as text, grouped by lane, empty lanes left out. */
@@ -137,7 +189,15 @@ export function summary(items: readonly Item[]): string {
   for (const lane of LANES) {
     const inLane = items.filter(one => one.lane === lane)
     if (inLane.length === 0) continue
-    blocks.push([`${LANE_TITLES[lane]} (${inLane.length})`, ...inLane.map(one => `  ${itemLine(one)}  {${one.id}}`)].join('\n'))
+    blocks.push(
+      [
+        `${LANE_TITLES[lane]} (${inLane.length})`,
+        ...inLane.flatMap(one => [
+          `  ${itemLine(one)}  {${one.id}}`,
+          ...(one.isAwaitingApproval && one.check ? [`      would run: ${JSON.stringify(one.check.argv)}`] : []),
+        ]),
+      ].join('\n'),
+    )
   }
   return blocks.join('\n\n')
 }
@@ -155,16 +215,45 @@ export function serialize(items: readonly Item[]): string {
   return JSON.stringify({ version: 1, items }, null, 2) + '\n'
 }
 
-/** Reads board.json; anything unreadable gives an empty board rather than a broken watch. */
-export function parse(text: string): Item[] {
+function isItem(one: unknown): one is Item {
+  if (typeof one !== 'object' || one === null) return false
+  const item = one as Record<string, unknown>
+  return typeof item.id === 'string' && typeof item.title === 'string' && isLane(item.lane)
+}
+
+/** A check as read from a file: argv must be strings, and an everyMs that is not a number is dropped. */
+function checkOf(value: unknown): Check | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const { argv, everyMs } = value as Record<string, unknown>
+  if (!Array.isArray(argv) || argv.length === 0 || !argv.every(one => typeof one === 'string')) return undefined
+  return { argv, ...(typeof everyMs === 'number' && Number.isFinite(everyMs) ? { everyMs } : {}) }
+}
+
+/**
+ * Reads board.json. A file that is not a board, or holds an item without an id, title or lane, is
+ * an error rather than an empty board, so the watch never writes over what it could not read.
+ */
+export function parseBoard(text: string): { items: Item[] } | { error: string } {
+  let data: unknown
   try {
-    const data = JSON.parse(text) as { items?: unknown }
-    if (!Array.isArray(data.items)) return []
-    return data.items.filter(
-      (one): one is Item =>
-        typeof one === 'object' && one !== null && typeof one.id === 'string' && typeof one.title === 'string' && isLane(one.lane),
-    )
-  } catch {
-    return []
+    data = JSON.parse(text)
+  } catch (error) {
+    return { error: `not JSON: ${error instanceof Error ? error.message : String(error)}` }
   }
+  const items = (data as { items?: unknown } | null)?.items
+  if (!Array.isArray(items)) return { error: 'no items list' }
+  const bad = items.findIndex(one => !isItem(one))
+  if (bad !== -1) return { error: `item ${bad + 1} has no id, title or known lane` }
+  return {
+    items: items.map((one: Item) => {
+      const { check, ...rest } = one
+      const valid = checkOf(check)
+      return valid ? { ...rest, check: valid } : rest
+    }),
+  }
+}
+
+export function parse(text: string): Item[] {
+  const read = parseBoard(text)
+  return 'items' in read ? read.items : []
 }

@@ -3,22 +3,24 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type { Item, Watch } from '../types'
 import {
-  applyCheck,
+  applyToBoard,
+  attempt,
   changeReport,
   drop,
   dueChecks,
+  failureOf,
   isLane,
   itemLine,
   LANE_TITLES,
   LANES,
   move,
-  parse,
+  parseBoard,
   serialize,
   statusLine,
   summary,
   track,
 } from './board'
-import type { CheckOutcome, ItemPatch } from './board'
+import type { CheckOutcome, CheckResult, ItemPatch } from './board'
 
 // Watchmen only wakes in the session the launcher starts (WATCHMEN=1), so the plugin can be
 // installed everywhere and stay silent in every other session. The persona and the briefing are
@@ -28,14 +30,16 @@ import type { CheckOutcome, ItemPatch } from './board'
 const HANDOFF_DIR = '.companion'
 const HANDOFF_PREFIX = 'handoff-'
 const BOARD_FILE = `${HANDOFF_DIR}/board.json`
+const BOARD_TEMP = `${BOARD_FILE}.tmp`
+const BOARD_BACKUP = `${BOARD_FILE}.bak`
 const TICK_MS = 15_000
 const HANDOFF_AT = 75
 const PANE = 'board'
 const PANE_TITLE = '⚛ watchmen'
+const NOT_WATCH = 'Watchmen is not keeping the watch in this session.'
 
 const WATCH = { plugin: 'watchmen', key: 'watch' } as const
 const board = atom({ plugin: 'watchmen', key: 'board' } as const, [])
-
 
 export function newestHandoff(names: readonly string[]): string | undefined {
   return names
@@ -56,35 +60,80 @@ const ITEM_PROPERTIES = {
   check: {
     type: 'object',
     description:
-      'A host command whose output tells the item\'s state, run every everyMs (default 300000, at least 60000). argv, no shell: use ["sh","-c","..."] for pipes.',
+      'A host command whose output tells the item\'s state, run every everyMs (default 300000, at least 60000). argv, no shell: use ["sh","-c","..."] for pipes. A new command runs only once the human approves it with /watchmen approve <id>.',
     properties: { argv: { type: 'array', items: { type: 'string' } }, everyMs: { type: 'number' } },
     required: ['argv'],
   },
 }
 
-async function save($: EngineInterface, items: readonly Item[]) {
+async function sha256(text: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text))
+  return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('')
+}
+
+/**
+ * The store key that says the human approved this command in this workspace. A check is host code
+ * execution, and a board.json or a board_track call can come from anyone who can write to the repo
+ * or the conversation, so no check runs until the human approves its exact argv here.
+ */
+async function approvalKey($: EngineInterface, argv: readonly string[]): Promise<string> {
+  return `approved:${await sha256(JSON.stringify([await $.session.cwd(), argv]))}`
+}
+
+async function isApproved($: EngineInterface, argv: readonly string[]): Promise<boolean> {
+  return (await $.store.get(await approvalKey($, argv))) === true
+}
+
+// Saves run one after another, each writing the board as it stands when its turn comes, so a slow
+// save never lands after a newer one. Each writes a temp file and renames it over board.json.
+let saving: Promise<void> = Promise.resolve()
+
+function save($: EngineInterface): Promise<void> {
+  saving = saving.then(() => writeBoard($)).catch(() => undefined)
+  return saving
+}
+
+async function writeBoard($: EngineInterface) {
+  const watch = (await $.state.get(WATCH)).value
+  // A board.json the watch could not read is never written over until the human reloads or resets.
+  if (!watch || watch.boardError) return
   try {
-    await $.fs.write(BOARD_FILE, serialize(items))
+    await $.fs.write(BOARD_TEMP, serialize(await read($, board)))
+    const moved = await $.process.run(['mv', '-f', BOARD_TEMP, BOARD_FILE])
+    if (moved.exitCode !== 0) throw new Error(moved.stderr.trim() || `mv exited ${moved.exitCode}`)
   } catch (error) {
     $.ui.log(`watchmen: could not save the board: ${String(error)}`)
   }
 }
 
+/** Loads board.json. One it cannot read is copied to board.json.bak and blocks every save. */
+async function loadBoard($: EngineInterface): Promise<string | undefined> {
+  if (!(await $.fs.exists(BOARD_FILE))) {
+    await update($, board, () => [])
+    return undefined
+  }
+  const text = await $.fs.read(BOARD_FILE)
+  const parsed = parseBoard(text)
+  if ('items' in parsed) {
+    await update($, board, () => parsed.items)
+    return undefined
+  }
+  // The board in memory is left as it is: empty at start, and kept when a reload fails.
+  await $.fs.write(BOARD_BACKUP, text)
+  $.ui.toast(
+    `board.json could not be read (${parsed.error}). Kept as board.json.bak; it will not be written over. Fix it and /watchmen reload, or /watchmen reset.`,
+    { timeoutMs: 15_000 },
+  )
+  return parsed.error
+}
+
 /** Changes the board, persists it, and answers what the change says or the reason it was refused. */
 async function change($: EngineInterface, fn: (items: Item[]) => Item[], ok: (items: Item[]) => string) {
-  let error: string | undefined
-  let after: Item[] = []
-  await update($, board, items => {
-    try {
-      after = fn(items ?? [])
-      return after
-    } catch (thrown) {
-      error = thrown instanceof Error ? thrown.message : String(thrown)
-      return items ?? []
-    }
-  })
+  const step = attempt(fn)
+  await update($, board, items => step.run(items ?? []))
+  const { error, after } = step.outcome()
   if (error) return { deny: error }
-  await save($, after)
+  await save($)
   return { result: ok(after) }
 }
 
@@ -110,30 +159,51 @@ async function isWatch($: EngineInterface) {
   return (await $.state.get(WATCH)).value !== undefined
 }
 
+async function setAwaiting($: EngineInterface, id: string, isAwaitingApproval: boolean) {
+  await update($, board, items =>
+    (items ?? []).map(one => {
+      if (one.id !== id) return one
+      const { isAwaitingApproval: _, ...rest } = one
+      return isAwaitingApproval ? { ...rest, isAwaitingApproval } : rest
+    }),
+  )
+}
+
 async function runCheck($: EngineInterface, item: Item, now: number) {
   running.add(item.id)
-  await update($, board, items => (items ?? []).map(one => (one.id === item.id ? { ...one, checkedAt: now } : one)))
-  let outcome: CheckOutcome
   try {
-    outcome = await $.process.run(item.check!.argv)
-  } catch (error) {
-    outcome = { error: error instanceof Error ? error.message : String(error) }
-  }
-  let changedTitle: string | undefined
-  let after: Item[] = []
-  await update($, board, items => {
-    after = (items ?? []).map(one => {
-      // Dropped meanwhile, or given another check: this outcome no longer describes the item.
-      if (one.id !== item.id || JSON.stringify(one.check) !== JSON.stringify(item.check)) return one
-      const applied = applyCheck(one, outcome, now)
-      if (applied.isChanged) changedTitle = one.title
-      return applied.item
+    const argv = item.check!.argv
+    if (!(await isApproved($, argv))) {
+      if (!item.isAwaitingApproval) {
+        await setAwaiting($, item.id, true)
+        await save($)
+      }
+      return
+    }
+    if (item.isAwaitingApproval) await setAwaiting($, item.id, false)
+    await update($, board, items => (items ?? []).map(one => (one.id === item.id ? { ...one, checkedAt: now } : one)))
+    let outcome: CheckOutcome
+    try {
+      outcome = await $.process.run(argv)
+    } catch (error) {
+      outcome = { error: error instanceof Error ? error.message : String(error) }
+    }
+    const failure = failureOf(outcome)
+    const result: CheckResult =
+      failure !== undefined || 'error' in outcome
+        ? { error: failure ?? 'check failed' }
+        : { output: outcome.stdout.trim(), hash: await sha256(outcome.stdout.trim()) }
+    let changedTitle: string | undefined
+    await update($, board, items => {
+      const applied = applyToBoard(items ?? [], item, result, now)
+      changedTitle = applied.changedTitle
+      return applied.items
     })
-    return after
-  })
-  running.delete(item.id)
-  await save($, after)
-  if (changedTitle) $.ui.toast(`⚛ ${changedTitle} changed`, { timeoutMs: 8_000 })
+    await save($)
+    if (changedTitle) $.ui.toast(`⚛ ${changedTitle} changed`, { timeoutMs: 8_000 })
+  } finally {
+    running.delete(item.id)
+  }
 }
 
 async function tick($: EngineInterface) {
@@ -142,7 +212,7 @@ async function tick($: EngineInterface) {
   const now = await $.clock.now()
   const items = await read($, board)
   for (const item of dueChecks(items, now, running)) {
-    void runCheck($, item, now).catch(() => running.delete(item.id))
+    void runCheck($, item, now).catch(error => $.ui.log(`watchmen: check ${item.id} failed: ${String(error)}`))
   }
   const { context } = await $.session.usage()
   const percent = context.percent ?? 0
@@ -168,14 +238,14 @@ export const register: Register = on => {
       if ((await $.env.get('WATCHMEN')) !== '1') return result
       const entries = (await $.fs.exists(HANDOFF_DIR)) ? await $.fs.list(HANDOFF_DIR) : []
       const latest = newestHandoff(entries.filter(one => one.kind === 'file').map(one => one.name))
+      const boardError = await loadBoard($)
       watch = {
         handoff: latest && `${HANDOFF_DIR}/${latest}`,
         skill: (await $.env.get('WATCHMEN_SKILL')) || undefined,
         startedAt: await $.clock.now(),
         warned: false,
+        ...(boardError ? { boardError } : {}),
       } satisfies Watch
-      const saved = (await $.fs.exists(BOARD_FILE)) ? parse(await $.fs.read(BOARD_FILE)) : []
-      await update($, board, () => saved)
       await $.state.set(WATCH, watch)
     }
     await $.env.set('WATCHMEN', undefined)
@@ -183,8 +253,8 @@ export const register: Register = on => {
 
     await $.command.register({
       name: 'watchmen',
-      description: 'The watch: open the board, or track <title> | brief',
-      argumentHint: '[track <title> | brief]',
+      description: 'The watch: open the board, or track <title> | brief | approve <id> | reload | reset',
+      argumentHint: '[track <title> | brief | approve <id> | reload | reset]',
     })
     await $.tool.register({
       name: 'board_track',
@@ -224,13 +294,13 @@ export const register: Register = on => {
   })
 
   on('tool.call', { tool: 'mcp__watchmen__board_track' }, async ($, e) => {
-    if (!(await isWatch($))) return { deny: 'Watchmen is not keeping the watch in this session.' }
+    if (!(await isWatch($))) return { deny: NOT_WATCH }
     const patch = patchFrom(e as Record<string, unknown>)
     return change($, items => track(items, patch), items => `Tracked. ${items.length} items on the board.`)
   })
 
   on('tool.call', { tool: 'mcp__watchmen__board_move' }, async ($, e) => {
-    if (!(await isWatch($))) return { deny: 'Watchmen is not keeping the watch in this session.' }
+    if (!(await isWatch($))) return { deny: NOT_WATCH }
     const input = e as Record<string, unknown>
     if (input.lane !== undefined && !isLane(input.lane)) return { deny: `Unknown lane: ${String(input.lane)}` }
     const lane = isLane(input.lane) ? input.lane : undefined
@@ -239,19 +309,19 @@ export const register: Register = on => {
   })
 
   on('tool.call', { tool: 'mcp__watchmen__board_drop' }, async ($, e) => {
-    if (!(await isWatch($))) return { deny: 'Watchmen is not keeping the watch in this session.' }
+    if (!(await isWatch($))) return { deny: NOT_WATCH }
     const id = String((e as Record<string, unknown>).id)
     return change($, items => drop(items, id), items => `Dropped. ${items.length} items left.`)
   })
 
   on('tool.call', { tool: 'mcp__watchmen__board_changes' }, async $ => {
-    if (!(await isWatch($))) return { deny: 'Watchmen is not keeping the watch in this session.' }
+    if (!(await isWatch($))) return { deny: NOT_WATCH }
     return { result: changeReport(await read($, board)) }
   })
 
   on('command.run', { command: 'watchmen' }, async ($, e) => {
     const watch = (await $.state.get(WATCH)).value
-    if (!watch) return { text: 'Watchmen is not keeping the watch in this session.' }
+    if (!watch) return { text: NOT_WATCH }
     const [verb, ...rest] = e.args.trim().split(/\s+/)
     if (verb === 'track') {
       const title = rest.join(' ')
@@ -259,11 +329,33 @@ export const register: Register = on => {
       const answer = await change($, items => track(items, { title, kind: 'todo' }, 'needs-you'), () => `Tracked: ${title}`)
       return { text: 'deny' in answer ? answer.deny : answer.result }
     }
+    if (verb === 'approve') {
+      // Only the human's own typing approves a command: the model, a loop or a plugin running
+      // /watchmen approve is refused, so a planted or injected check cannot approve itself.
+      if (e.origin.kind !== 'composer' && e.origin.kind !== 'bridge') {
+        return { text: 'Only you can approve a check: type /watchmen approve <id> yourself.' }
+      }
+      const item = (await read($, board)).find(one => one.id === rest[0])
+      if (!item?.check) return { text: `No item "${rest[0] ?? ''}" with a check on the board.` }
+      await $.store.set(await approvalKey($, item.check.argv), true)
+      await setAwaiting($, item.id, false)
+      await save($)
+      return { text: `Approved for this workspace: ${JSON.stringify(item.check.argv)}` }
+    }
+    if (verb === 'reload' || verb === 'reset') {
+      const boardError = verb === 'reload' ? await loadBoard($) : undefined
+      const { boardError: _, ...rest } = watch
+      await $.state.set(WATCH, boardError ? { ...rest, boardError } : rest)
+      if (boardError) return { text: `board.json still cannot be read: ${boardError}` }
+      if (verb === 'reset') await save($)
+      return { text: verb === 'reload' ? 'Board reloaded.' : 'Board reset: board.json will be written from the board as it is now.' }
+    }
     const items = await read($, board)
     if (verb === 'brief') return { text: summary(items) }
     await $.ui.open({ id: PANE, title: PANE_TITLE }).catch(() => undefined)
     const { context } = await $.session.usage()
     const lines = [
+      ...(watch.boardError ? [`⚠ board.json could not be read (${watch.boardError}); not saving until /watchmen reload or reset.`, ''] : []),
       summary(items),
       '',
       `handoff: ${watch.handoff ?? 'none yet'}`,
