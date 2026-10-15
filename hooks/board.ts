@@ -274,3 +274,18 @@ export function parse(text: string): Item[] {
   const read = parseBoard(text)
   return 'items' in read ? read.items : []
 }
+
+/** The short line the herdr spaces sidebar shows for the watch, as the `$watchmen` token. */
+export function sidebarToken(items: readonly Item[]): string {
+  const tally = counts(items)
+  const changed = items.filter(one => one.isChanged).length
+  if (tally['needs-you'] > 0) return `⚛ ${tally['needs-you']} need you`
+  if (changed > 0) return `⚛ ${changed} changed`
+  return '⚛ quiet'
+}
+
+/** A herdr id or binary path safe to hand to a process: no option-like or shell-special text. */
+export function isSafeHerdrArg(value: string | undefined, kind: 'id' | 'bin'): value is string {
+  if (!value || value.startsWith('-')) return false
+  return kind === 'id' ? /^[A-Za-z0-9_:.-]{1,128}$/.test(value) : value === 'herdr' || /^\/[^\0\n]*$/.test(value)
+}

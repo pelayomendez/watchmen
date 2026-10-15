@@ -5,6 +5,8 @@ export type Watch = {
   warned: boolean
   /** Set when board.json could not be read: the file is not written until the human reloads or resets. */
   boardError?: string
+  /** Where to publish the sidebar token when the watch runs inside herdr. */
+  herdr?: { bin: string; workspace: string }
 }
 
 /** Where an item stands for the human: what needs them, what moves on its own, what waits on others. */

@@ -3,6 +3,7 @@
 #   - none running              -> split right in this tab and start `watchmen` there
 #   - running in another tab    -> move it here as a right split, focused
 #   - running in this tab       -> send it back to a tab of its own, labelled "watchmen", still running
+# Summoning turns follow mode on (the watch moves with you between tabs); sending it home turns it off.
 # herdr injects HERDR_BIN_PATH into an action. Nothing is done on input that cannot be trusted.
 set -uo pipefail
 
@@ -43,6 +44,13 @@ new_pane_id() {
     })'
 }
 
+# Follow mode: on when the watch is summoned beside you, off when it is sent home. The tab.focused
+# hook (scripts/herdr-follow.mjs) reads it.
+set_follow() {
+  local dir="${XDG_STATE_HOME:-$HOME/.local/state}/watchmen"
+  mkdir -p "$dir" && printf '%s\n' "$1" > "$dir/follow"
+}
+
 read -r verb a b c rest <<<"$decision"
 case "$verb" in
   SPAWN)
@@ -60,16 +68,19 @@ case "$verb" in
     pane="$(printf '%s' "$created" | new_pane_id)"
     safe_id "$pane" || fail "pane split gave no usable pane id"
     "$herdr_bin" pane rename "$pane" "$label" >/dev/null 2>&1 || true
+    set_follow on
     exec "$herdr_bin" pane run "$pane" "$(printf '%q' "$root/bin/watchmen")"
     ;;
   BRING)
     pane="$a"; tab="$b"; target="$c"
     safe_id "$pane" && safe_id "$tab" && safe_id "$target" || fail "unsafe id in decision"
+    set_follow on
     exec "$herdr_bin" pane move "$pane" --tab "$tab" --target-pane "$target" --split right --ratio "$ratio" --label "$label" --focus
     ;;
   SEND)
     pane="$a"
     safe_id "$pane" || fail "unsafe id in decision"
+    set_follow off
     exec "$herdr_bin" pane move "$pane" --new-tab --tab-label "$label" --label "$label" --no-focus
     ;;
   ERROR)
