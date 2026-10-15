@@ -31,7 +31,6 @@ const HANDOFF_DIR = '.companion'
 const HANDOFF_PREFIX = 'handoff-'
 const BOARD_FILE = `${HANDOFF_DIR}/board.json`
 const BOARD_TEMP = `${BOARD_FILE}.tmp`
-const BOARD_BACKUP = `${BOARD_FILE}.bak`
 const TICK_MS = 15_000
 const HANDOFF_AT = 75
 const PANE = 'board'
@@ -60,7 +59,7 @@ const ITEM_PROPERTIES = {
   check: {
     type: 'object',
     description:
-      'A host command whose output tells the item\'s state, run every everyMs (default 300000, at least 60000). argv, no shell: use ["sh","-c","..."] for pipes. A new command runs only once the human approves it with /watchmen approve <id>.',
+      'A host command whose output tells the item\'s state, run every everyMs (default 300000, at least 60000). argv, no shell: use ["sh","-c","..."] for pipes. A new command runs only once the human approves it with /watchmen approve <id> <hash>.',
     properties: { argv: { type: 'array', items: { type: 'string' } }, everyMs: { type: 'number' } },
     required: ['argv'],
   },
@@ -76,8 +75,20 @@ async function sha256(text: string): Promise<string> {
  * execution, and a board.json or a board_track call can come from anyone who can write to the repo
  * or the conversation, so no check runs until the human approves its exact argv here.
  */
+async function commandHash($: EngineInterface, argv: readonly string[]): Promise<string> {
+  return sha256(JSON.stringify([await $.session.cwd(), argv]))
+}
+
 async function approvalKey($: EngineInterface, argv: readonly string[]): Promise<string> {
-  return `approved:${await sha256(JSON.stringify([await $.session.cwd(), argv]))}`
+  return `approved:${await commandHash($, argv)}`
+}
+
+/**
+ * The short hash the human types to approve a command: it names the exact argv they were shown,
+ * so a command changed after they read it no longer matches.
+ */
+async function shortHash($: EngineInterface, argv: readonly string[]): Promise<string> {
+  return (await commandHash($, argv)).slice(0, 8)
 }
 
 async function isApproved($: EngineInterface, argv: readonly string[]): Promise<boolean> {
@@ -106,7 +117,7 @@ async function writeBoard($: EngineInterface) {
   }
 }
 
-/** Loads board.json. One it cannot read is copied to board.json.bak and blocks every save. */
+/** Loads board.json. One it cannot read is copied to a timestamped .bak and blocks every save. */
 async function loadBoard($: EngineInterface): Promise<string | undefined> {
   if (!(await $.fs.exists(BOARD_FILE))) {
     await update($, board, () => [])
@@ -118,10 +129,12 @@ async function loadBoard($: EngineInterface): Promise<string | undefined> {
     await update($, board, () => parsed.items)
     return undefined
   }
-  // The board in memory is left as it is: empty at start, and kept when a reload fails.
-  await $.fs.write(BOARD_BACKUP, text)
+  // The board in memory is left as it is: empty at start, and kept when a reload fails. Each
+  // unreadable copy gets a backup of its own, so a later failure never replaces an earlier backup.
+  const backup = `${BOARD_FILE}.${await $.clock.now()}.bak`
+  if (!(await $.fs.exists(backup))) await $.fs.write(backup, text)
   $.ui.toast(
-    `board.json could not be read (${parsed.error}). Kept as board.json.bak; it will not be written over. Fix it and /watchmen reload, or /watchmen reset.`,
+    `board.json could not be read (${parsed.error}). Kept as ${backup}; board.json will not be written over. Fix it and /watchmen reload, or /watchmen reset.`,
     { timeoutMs: 15_000 },
   )
   return parsed.error
@@ -159,12 +172,13 @@ async function isWatch($: EngineInterface) {
   return (await $.state.get(WATCH)).value !== undefined
 }
 
-async function setAwaiting($: EngineInterface, id: string, isAwaitingApproval: boolean) {
+/** Marks an item's check as waiting for approval of the command with this short hash, or clears it. */
+async function setAwaiting($: EngineInterface, id: string, approvalHash: string | undefined) {
   await update($, board, items =>
     (items ?? []).map(one => {
       if (one.id !== id) return one
-      const { isAwaitingApproval: _, ...rest } = one
-      return isAwaitingApproval ? { ...rest, isAwaitingApproval } : rest
+      const { isAwaitingApproval: _, approvalHash: __, ...rest } = one
+      return approvalHash ? { ...rest, isAwaitingApproval: true, approvalHash } : rest
     }),
   )
 }
@@ -174,13 +188,14 @@ async function runCheck($: EngineInterface, item: Item, now: number) {
   try {
     const argv = item.check!.argv
     if (!(await isApproved($, argv))) {
-      if (!item.isAwaitingApproval) {
-        await setAwaiting($, item.id, true)
+      const hash = await shortHash($, argv)
+      if (!item.isAwaitingApproval || item.approvalHash !== hash) {
+        await setAwaiting($, item.id, hash)
         await save($)
       }
       return
     }
-    if (item.isAwaitingApproval) await setAwaiting($, item.id, false)
+    if (item.isAwaitingApproval) await setAwaiting($, item.id, undefined)
     await update($, board, items => (items ?? []).map(one => (one.id === item.id ? { ...one, checkedAt: now } : one)))
     let outcome: CheckOutcome
     try {
@@ -253,8 +268,8 @@ export const register: Register = on => {
 
     await $.command.register({
       name: 'watchmen',
-      description: 'The watch: open the board, or track <title> | brief | approve <id> | reload | reset',
-      argumentHint: '[track <title> | brief | approve <id> | reload | reset]',
+      description: 'The watch: open the board, or track <title> | brief | approve <id> <hash> | reload | reset',
+      argumentHint: '[track <title> | brief | approve <id> <hash> | reload | reset]',
     })
     await $.tool.register({
       name: 'board_track',
@@ -333,12 +348,19 @@ export const register: Register = on => {
       // Only the human's own typing approves a command: the model, a loop or a plugin running
       // /watchmen approve is refused, so a planted or injected check cannot approve itself.
       if (e.origin.kind !== 'composer' && e.origin.kind !== 'bridge') {
-        return { text: 'Only you can approve a check: type /watchmen approve <id> yourself.' }
+        return { text: 'Only you can approve a check: type /watchmen approve <id> <hash> yourself.' }
       }
       const item = (await read($, board)).find(one => one.id === rest[0])
       if (!item?.check) return { text: `No item "${rest[0] ?? ''}" with a check on the board.` }
+      // The hash names the command the human was shown; a command changed since then is refused.
+      const hash = await shortHash($, item.check.argv)
+      if (rest[1] !== hash) {
+        return {
+          text: `Not approved: the hash does not match. ${item.id} would run ${JSON.stringify(item.check.argv)}; to approve exactly that, type /watchmen approve ${item.id} ${hash}`,
+        }
+      }
       await $.store.set(await approvalKey($, item.check.argv), true)
-      await setAwaiting($, item.id, false)
+      await setAwaiting($, item.id, undefined)
       await save($)
       return { text: `Approved for this workspace: ${JSON.stringify(item.check.argv)}` }
     }

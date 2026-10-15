@@ -33,6 +33,8 @@ export type Item = {
   checkError?: string
   /** The check's command has not been approved by the human, so it does not run. */
   isAwaitingApproval?: boolean
+  /** The short hash of the command awaiting approval: what /watchmen approve <id> <hash> must name. */
+  approvalHash?: string
   /** When the check last started, so a slow check is not started twice. */
   checkedAt?: number
   /** When the check's output last changed. */

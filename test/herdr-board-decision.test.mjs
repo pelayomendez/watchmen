@@ -1,5 +1,10 @@
 import assert from 'node:assert/strict'
+import { execFileSync } from 'node:child_process'
+import { mkdtempSync, rmSync, symlinkSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { test } from 'node:test'
+import { fileURLToPath } from 'node:url'
 
 import { decide, isFlagSafe } from '../scripts/herdr-board-decision.mjs'
 
@@ -26,4 +31,19 @@ test('anything unreadable or unsafe opens instead of acting on a pane id', () =>
   assert.equal(decide(list(pane('w1:p1', { focused: true }), pane('a;rm -rf', { label: '⚛ watchmen' }))), 'OPEN')
   assert.equal(isFlagSafe('w1:p2'), true)
   assert.equal(isFlagSafe('-x'), false)
+})
+
+test('the command decides through a symlinked path with a space in it', () => {
+  // herdr runs plugins from a folder it chose; the command must not depend on how it is reached.
+  const dir = mkdtempSync(join(tmpdir(), 'watch men '))
+  try {
+    const scripts = fileURLToPath(new URL('../scripts/', import.meta.url))
+    const linked = join(dir, 'scripts dir')
+    symlinkSync(scripts, linked)
+    const input = list(pane('w1:p1'), pane('w1:p2', { label: '⚛ watchmen', focused: true }))
+    const out = execFileSync(process.execPath, [join(linked, 'herdr-board-decide.mjs')], { input, encoding: 'utf8' })
+    assert.equal(out, 'CLOSE w1:p2')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })

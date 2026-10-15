@@ -4,19 +4,30 @@
 //
 // Usage: watchmen-board [path/to/board.json | workspace dir] [--once]
 
-import { existsSync, readFileSync, statSync, watch } from 'node:fs'
+import { existsSync, readFileSync, realpathSync, statSync, watch } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
-import { readBoard, render, resolveBoardPath, wantsColor } from './board-render.mjs'
+import { readBoard, render, resolveBoardPath, startWatch, wantsColor } from './board-render.mjs'
 
 const args = process.argv.slice(2)
 const isOnce = args.includes('--once')
-const { file } = resolveBoardPath({
+// herdr starts the panel in the plugin's folder: that cwd is never the board's.
+const pluginRoot = dirname(dirname(realpathSync(fileURLToPath(import.meta.url))))
+const realCwd = (() => {
+  try {
+    return realpathSync(process.cwd())
+  } catch {
+    return process.cwd()
+  }
+})()
+const { file, pid } = resolveBoardPath({
   arg: args.find(arg => arg !== '--once'),
   env: process.env,
-  cwd: process.cwd(),
+  cwd: realCwd,
   home: homedir(),
+  pluginRoot,
   isDir: path => {
     try {
       return statSync(path).isDirectory()
@@ -28,6 +39,17 @@ const { file } = resolveBoardPath({
   read: path => readFileSync(path, 'utf8'),
 })
 const workspace = basename(dirname(dirname(file)))
+
+/** A board found through the pointer belongs to a watch that may have ended. */
+function isStale() {
+  if (pid === undefined) return false
+  try {
+    process.kill(pid, 0)
+    return false
+  } catch (error) {
+    return error.code !== 'EPERM'
+  }
+}
 const color = wantsColor(process.env) && process.stdout.isTTY === true
 const isLive = !isOnce && process.stdout.isTTY === true
 
@@ -51,7 +73,7 @@ function load() {
 }
 
 function draw() {
-  const lines = render(state, { columns: process.stdout.columns || 80, now: Date.now(), color, workspace })
+  const lines = render(state, { columns: process.stdout.columns || 80, now: Date.now(), color, workspace, isStale: isStale() })
   const rows = process.stdout.rows || lines.length
   const body = (isLive ? lines.slice(0, rows) : lines).join('\n')
   process.stdout.write(isLive ? `\x1b[H\x1b[2J${body}` : `${body}\n`)
@@ -86,12 +108,11 @@ function refresh(force = false) {
 
 // Saves replace board.json through a temp file and a rename, so the directory is watched rather
 // than the file; a two-second poll covers a directory that appears later or a watch that misses.
+// A watch can fail later (the folder removed, a limit reached): it is dropped and the poll carries on.
 function watchDir() {
-  try {
-    return watch(dirname(file), () => refresh())
-  } catch {
-    return undefined
-  }
+  return startWatch(watch, dirname(file), () => refresh(), lost => {
+    if (watcher === lost) watcher = undefined
+  })
 }
 let watcher = watchDir()
 setInterval(() => {

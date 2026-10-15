@@ -46,7 +46,7 @@ Items are deliberately loose. An item is a title in a lane, with an optional fre
 | `waiting` | it waits on someone else |
 | `done` | kept until dropped; no longer checked |
 
-**A check runs only after you approve it.** A check is a command on your machine, and a board.json in a repo or a prompt-injected `board_track` call could name any command, so each new command waits, marked `⚠ check awaiting approval`, until you type `/watchmen approve <id>` yourself (`/watchmen brief` shows what it would run). Approval is per exact command and workspace, kept across sessions; the model cannot approve.
+**A check runs only after you approve it.** A check is a command on your machine, and a board.json in a repo or a prompt-injected `board_track` call could name any command, so each new command waits, marked `⚠ check awaiting approval`, until you type `/watchmen approve <id> <hash>` yourself. `/watchmen brief` and the item show the command and its short hash; the hash names exactly the command you read, so a command changed since then is refused. Approval is per exact command and workspace, kept across sessions; the model cannot approve.
 
 Every 15 seconds the plugin runs the checks that are due (each on its own interval: 5 minutes by default, never under 1 minute, never two at once). The first output is the baseline. When a later output differs, the item is marked changed (◆), a toast says so, and the watch calls `board_changes` and triages: it moves the item to its lane with a one-line note. A failing check shows `⚠ check failed` beside the item and leaves its note alone. A change is detected on the whole output; only its first 2,000 characters are kept for display.
 
@@ -61,20 +61,20 @@ Tell the watch what to track in plain words ("keep an eye on NRV-123 and MR 42")
 | A branch moving | `["git", "ls-remote", "origin", "refs/heads/main"]` |
 | A todo | no check: it stays where you put it |
 
-The model's tools are `board_track`, `board_move`, `board_drop` and `board_changes`. The board is kept in `.companion/board.json` (written through a temp file and a rename), so the next watch picks it up. If the file cannot be read, it is copied to `board.json.bak` and never written over until you fix it and `/watchmen reload`, or start over with `/watchmen reset`.
+The model's tools are `board_track`, `board_move`, `board_drop` and `board_changes`. The board is kept in `.companion/board.json` (written through a temp file and a rename), so the next watch picks it up. If the file cannot be read, it is copied to a timestamped `board.json.<time>.bak` (earlier backups are never replaced) and never written over until you fix it and `/watchmen reload`, or start over with `/watchmen reset`.
 
 ## What you see
 
 - **The pane**, `⚛ watchmen`: the lanes with their items, changed ones marked ◆ and bold. It opens by itself beside the transcript in the fullscreen layout; on the main screen, `/watchmen` opens it.
 - **The status line**: `⚛ watchmen · 2 need you · 1 moving · 1 changed · 42% · 3h07`. At 75% context it asks for a handoff before the window fills.
 - **Toasts**: one when an item changes, one when the watch runs long.
-- **`/watchmen`** opens the pane and prints the board; `/watchmen brief` prints it grouped by lane; `/watchmen track <title>` adds a todo to needs-you; `/watchmen approve <id>` lets an item's check run; `/watchmen reload` and `/watchmen reset` recover from an unreadable board.json.
+- **`/watchmen`** opens the pane and prints the board; `/watchmen brief` prints it grouped by lane; `/watchmen track <title>` adds a todo to needs-you; `/watchmen approve <id> <hash>` lets an item's check run; `/watchmen reload` and `/watchmen reset` recover from an unreadable board.json.
 
 ## The board outside Claude
 
 `watchmen board` is a read-only viewer of `.companion/board.json` for a terminal of its own: lanes in order (NEEDS YOU, MOVING, WAITING, DONE as a count), each item with its label, note, how long ago it changed, its link, and a failing or unapproved check. It redraws when the file changes and when the terminal resizes, never writes, respects `NO_COLOR`, and exits cleanly on Ctrl-C. `--once` prints the board and exits.
 
-It finds the board in this order: a path given as an argument, `WATCHMEN_BOARD`, a `.companion` folder in the current directory, then the folder the last `watchmen` started in (the launcher records it in `${XDG_STATE_HOME:-~/.local/state}/watchmen/current`).
+It finds the board in this order: a path given as an argument; `WATCHMEN_BOARD`; under herdr, the nearest `.companion/board.json` at or above the pane the panel was opened from (`focused_pane_cwd`); a `.companion` folder in the current directory (never the plugin's own folder, where herdr starts the panel); then the folder the last `watchmen` started in. The launcher records that folder and its process id in `${XDG_STATE_HOME:-~/.local/state}/watchmen/current`, and the header says `(stale)` when that watch is no longer running.
 
 ## In herdr
 

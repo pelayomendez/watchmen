@@ -68,9 +68,10 @@ if [ -n "${WATCHMEN_PRINT_BRIEFING:-}" ]; then
 fi
 
 mkdir -p .companion
-# Record where the watch is kept, so a board viewer opened in any herdr tab finds this board.
+# Record where the watch is kept, so a board viewer opened in any herdr tab finds this board, and
+# this process's id, which exec hands to claude, so the viewer can tell when the watch has ended.
 state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/watchmen"
-mkdir -p "$state_dir" && printf '%s\n' "$PWD" > "$state_dir/current"
+mkdir -p "$state_dir" && printf '%s\n%s\n' "$PWD" "$$" > "$state_dir/current"
 export WATCHMEN=1
 export WATCHMEN_SKILL="$skill"
 

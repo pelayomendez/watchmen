@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { ago, fit, readBoard, render, wantsColor } from '../bin/board-render.mjs'
+import { ago, clean, fit, readBoard, render, wantsColor } from '../bin/board-render.mjs'
 
 const NOW = Date.parse('2026-10-15T12:00:00')
 const OPTIONS = { columns: 80, now: NOW, color: false, workspace: 'neuraverse' }
@@ -88,29 +88,75 @@ test('ages read in seconds, minutes, hours, then days', () => {
   assert.equal(ago(72 * 3_600_000), '3d ago')
 })
 
-test('finds the board: argument, then WATCHMEN_BOARD, then the cwd, then the launcher\'s pointer', async () => {
+test('finds the board: argument, WATCHMEN_BOARD, the herdr pane, the cwd unless it is the plugin, then the pointer', async () => {
   const { resolveBoardPath } = await import('../bin/board-render.mjs')
-  const dirs = new Set(['/ws/a', '/ws/b', '/tab/.companion'])
-  const files = { '/state/watchmen/current': '/ws/watch\n' }
+  const dirs = new Set(['/ws/a', '/ws/b', '/tab/.companion', '/plugin/.companion'])
+  const files = {
+    '/state/watchmen/current': '/ws/watch\n4242\n',
+    '/repo/.companion/board.json': '{}',
+  }
   const io = (over = {}) => ({
     arg: undefined,
     env: { XDG_STATE_HOME: '/state' },
     cwd: '/tab',
     home: '/home/me',
+    pluginRoot: '/plugin',
     isDir: path => dirs.has(path),
     exists: path => path in files,
     read: path => files[path],
     ...over,
   })
-  const env = { XDG_STATE_HOME: '/state', WATCHMEN_BOARD: '/ws/b' }
+  const herdr = JSON.stringify({ focused_pane_cwd: '/repo/src/deep' })
+  const env = { XDG_STATE_HOME: '/state', WATCHMEN_BOARD: '/ws/b', HERDR_PLUGIN_CONTEXT_JSON: herdr }
 
   assert.deepEqual(resolveBoardPath(io({ arg: '/ws/a', env })), { file: '/ws/a/.companion/board.json', source: 'argument' })
   assert.deepEqual(resolveBoardPath(io({ arg: 'x/board.json' })), { file: '/tab/x/board.json', source: 'argument' })
   assert.deepEqual(resolveBoardPath(io({ env })), { file: '/ws/b/.companion/board.json', source: 'WATCHMEN_BOARD' })
-  assert.deepEqual(resolveBoardPath(io()), { file: '/tab/.companion/board.json', source: 'cwd' })
-  assert.deepEqual(resolveBoardPath(io({ cwd: '/elsewhere' })), { file: '/ws/watch/.companion/board.json', source: 'pointer' })
+  // herdr starts the panel in the plugin's folder: the pane it came from decides, walking up.
   assert.deepEqual(
-    resolveBoardPath(io({ cwd: '/elsewhere', env: {}, home: '/home/me' })),
-    { file: '/elsewhere/.companion/board.json', source: 'cwd' },
+    resolveBoardPath(io({ cwd: '/plugin', env: { XDG_STATE_HOME: '/state', HERDR_PLUGIN_CONTEXT_JSON: herdr } })),
+    { file: '/repo/.companion/board.json', source: 'herdr pane' },
   )
+  assert.deepEqual(resolveBoardPath(io()), { file: '/tab/.companion/board.json', source: 'cwd' })
+  // The plugin's own folder is never the board's, even with a .companion in it.
+  assert.deepEqual(resolveBoardPath(io({ cwd: '/plugin' })), { file: '/ws/watch/.companion/board.json', source: 'pointer', pid: 4242 })
+  assert.deepEqual(
+    resolveBoardPath(io({ cwd: '/plugin', env: { XDG_STATE_HOME: '/state', HERDR_PLUGIN_CONTEXT_JSON: '{"focused_pane_cwd":"/nowhere"}' } })),
+    { file: '/ws/watch/.companion/board.json', source: 'pointer', pid: 4242 },
+  )
+  assert.deepEqual(resolveBoardPath(io({ cwd: '/elsewhere', env: {} })), { file: '/elsewhere/.companion/board.json', source: 'cwd' })
+})
+
+test('the header says (stale) when the watch the pointer named is not running', () => {
+  assert.equal(show(readBoard(BOARD, NOW), { isStale: true })[0].includes('neuraverse (stale) · updated'), true)
+  assert.equal(show(readBoard(BOARD, NOW))[0].includes('(stale)'), false)
+})
+
+test('nothing on the board can reach the terminal as a control sequence', () => {
+  const hostile = '\x1b]52;c;cm0gLXJmIH4=\x07evil\x1b[2J\r\nnext\ttab\x9b31m\x7f'
+  const board = JSON.stringify({
+    items: [{ id: 'x', title: hostile, lane: 'needs-you', kind: hostile, note: hostile, link: hostile, checkError: hostile }],
+  })
+  for (const color of [false, true]) {
+    const lines = show(readBoard(board, NOW), { color, columns: 200 })
+    const stripped = lines.map(one => one.replace(/\x1b\[\d+m/g, ''))
+    for (const one of stripped) assert.doesNotMatch(one, /[\x00-\x1f\x7f-\x9f]/, JSON.stringify(one))
+    assert.ok(stripped.some(one => one.includes(']52;c;cm0gLXJmIH4=evil[2J  next tab31m')))
+  }
+  const broken = show(readBoard('{"items": "\x1b[2J', NOW))
+  for (const one of broken) assert.doesNotMatch(one, /[\x00-\x1f\x7f-\x9f]/)
+  assert.equal(clean('a\tb\nc\x1b[2Jd'), 'a b c[2Jd')
+})
+
+test('a directory watch that errors closes itself and is given up, so the poll carries on', async () => {
+  const { startWatch } = await import('../bin/board-render.mjs')
+  const { EventEmitter } = await import('node:events')
+  const fake = Object.assign(new EventEmitter(), { isClosed: false, close() { this.isClosed = true } })
+  let lost
+  const watching = startWatch(() => fake, '/dir', () => {}, one => (lost = one))
+  assert.equal(watching, fake)
+  fake.emit('error', new Error('EMFILE'))
+  assert.equal(fake.isClosed, true)
+  assert.equal(lost, fake)
+  assert.equal(startWatch(() => { throw new Error('ENOENT') }, '/gone', () => {}, () => {}), undefined)
 })
