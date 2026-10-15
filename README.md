@@ -105,7 +105,14 @@ description = "summon the watch"
 
 `watchmen` labels its own pane `watchmen` when it starts inside herdr (`herdr pane rename`); that label is how the action finds it.
 
-**Follow mode.** Summoning turns it on: from then on, each tab you focus in the same space brings the watch beside you there as a right split, and your own pane keeps focus. Sending the watch home turns it off. It is a `tab.focused` event hook in the manifest (`scripts/herdr-follow.mjs`): it skips the tab the watch is already in and its own `watchmen` tab, stays within its space, ignores rapid switches but the last (150 ms), never moves the pane twice at once, and turns follow off once the watch pane is gone. The state lives in `${XDG_STATE_HOME:-~/.local/state}/watchmen/follow`.
+**Follow mode.** Summoning turns it on: from then on, each tab you focus in the same space brings the watch beside you there as a right split, and your own pane keeps focus. Sending the watch home turns it off. herdr 0.9.0 does not run plugin event hooks on tab switches made in the UI, so summon starts a small follower process (`scripts/herdr-follower.mjs`, detached, one at a time, its pid in `follower.pid`) that subscribes to `tab.focused` on the herdr socket. It skips the tab the watch is already in and its own `watchmen` tab, stays within its space, follows only the last of rapid switches (150 ms), never moves the pane twice at once (a lock it shares with the `tab.focused` hook kept in the manifest for herdr versions that fire it), and exits when follow turns off, the watch pane is gone, or the socket closes. The state lives in `${XDG_STATE_HOME:-~/.local/state}/watchmen/follow`.
+
+To try the follower by hand, with the watch already running in herdr:
+
+```bash
+echo on > "${XDG_STATE_HOME:-$HOME/.local/state}/watchmen/follow"
+node scripts/herdr-follower.mjs        # foreground; Ctrl-C to stop
+```
 
 **In the spaces sidebar.** Inside herdr the watch publishes a short token for its space, `$watchmen` (`⚛ 2 need you`, `⚛ 1 changed`, `⚛ quiet`), refreshed every 15 seconds with a 45-second time to live, so it disappears soon after the watch stops. Show it by adding the token to the sidebar's space rows in `~/.config/herdr/config.toml`:
 

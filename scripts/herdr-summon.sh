@@ -49,6 +49,11 @@ new_pane_id() {
 set_follow() {
   local dir="${XDG_STATE_HOME:-$HOME/.local/state}/watchmen"
   mkdir -p "$dir" && printf '%s\n' "$1" > "$dir/follow"
+  # herdr 0.9.0 does not run the tab.focused hook on UI tab switches, so a follower process
+  # subscribes to the socket instead: started detached, once, and gone when follow turns off.
+  if [ "$1" = "on" ]; then
+    node "$script_dir/herdr-follower.mjs" --spawn >/dev/null 2>&1 || true
+  fi
 }
 
 read -r verb a b c rest <<<"$decision"

@@ -93,15 +93,26 @@ esac
     })
   const calls = () => readFileSync(join(dir, 'log'), 'utf8').trim().split('\n').filter(Boolean)
   const followState = () => (existsSync(join(state, 'follow')) ? readFileSync(join(state, 'follow'), 'utf8').trim() : undefined)
-  return { run, calls, followState }
+  return { run, calls, followState, state }
 }
 
 const BESIDE = panes(pane('w1:p7', 'w1:t1', WATCH), pane('w1:p2', 'w1:t2', { focused: true }))
 
-test('the hook moves the watch without taking focus, and only the newest of rapid switches moves', async () => {
+test('the hook moves the watch without taking focus', async () => {
   const box = sandbox({ follow: 'on', panesJson: BESIDE })
-  await Promise.all([box.run(event('w1:t1')), new Promise(r => setTimeout(r, 30)).then(() => box.run(event('w1:t2')))])
+  await box.run(event('w1:t2'))
   assert.deepEqual(box.calls(), ['herdr pane move w1:p7 --tab w1:t2 --target-pane w1:p2 --split right --ratio 0.35 --label watchmen --no-focus'])
+})
+
+test('the hook gives way when a newer event arrives within the debounce', async () => {
+  const box = sandbox({ follow: 'on', panesJson: BESIDE })
+  const done = box.run(event('w1:t2'))
+  // As soon as this run has stamped itself, a newer event stamps over it.
+  const latest = join(box.state, 'follow.latest')
+  while (!existsSync(latest)) await new Promise(r => setTimeout(r, 2))
+  writeFileSync(latest, 'newer:event')
+  await done
+  assert.deepEqual(box.calls(), [])
 })
 
 test('the hook does nothing while follow is off or another move holds the lock', async () => {

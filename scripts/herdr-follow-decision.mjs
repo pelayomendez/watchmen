@@ -66,3 +66,13 @@ export function decideFollow({ isFollowing, eventJson, panesJson, tabsJson }) {
   if (!isSafeId(target.pane_id)) return 'ERROR the focused pane has an unsafe id'
   return `MOVE ${watch.pane_id} ${focus.tab_id} ${target.pane_id}`
 }
+
+/** Whether a message from the herdr socket is a tab focus event. */
+export function isTabFocus(message) {
+  return message?.data?.type === 'tab_focused' || message?.event === 'tab_focused' || message?.event === 'tab.focused'
+}
+
+/** Whether a message from the herdr socket says a pane closed or exited. */
+export function isPaneEnd(message) {
+  return ['pane_closed', 'pane_exited'].includes(message?.data?.type) || ['pane.closed', 'pane.exited'].includes(message?.event)
+}
