@@ -63,7 +63,7 @@ if [ "$1 $2" = "pane split" ]; then echo '{"result":{"type":"pane_created","pane
     }
     const script = fileURLToPath(new URL('../scripts/herdr-summon.sh', import.meta.url))
     const run = spawnSync('bash', [script], {
-      env: { ...process.env, HERDR_BIN_PATH: bin, FAKE_PANES: join(dir, 'panes.json'), FAKE_LOG: join(dir, 'log'), XDG_STATE_HOME: state },
+      env: { ...process.env, HERDR_SOCKET_PATH: join(dir, 'no.sock'), HERDR_BIN_PATH: bin, FAKE_PANES: join(dir, 'panes.json'), FAKE_LOG: join(dir, 'log'), XDG_STATE_HOME: state },
       encoding: 'utf8',
     })
     const followFile = join(state, 'watchmen', 'follow')
