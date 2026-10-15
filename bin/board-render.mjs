@@ -37,11 +37,22 @@ export function readBoard(text, mtimeMs, previous) {
   return { kind: 'ok', items, mtimeMs }
 }
 
-/** Cuts text to `width` characters, the last one an ellipsis when anything was cut. */
+/**
+ * Makes text safe to draw: everything on the board comes from a file anyone with the repo can
+ * write, so C0 and C1 control characters and DEL (escape sequences, carriage returns, OSC 52
+ * clipboard writes) are removed, and tabs and newlines become spaces.
+ */
+export function clean(text) {
+  return String(text)
+    .replace(/[\t\n\r\v\f]/g, ' ')
+    .replace(/[\u0000-\u001f\u007f-\u009f]/g, '')
+}
+
+/** Cuts clean text to `width` characters, the last one an ellipsis when anything was cut. */
 export function fit(text, width) {
-  const chars = Array.from(text)
+  const chars = Array.from(clean(text))
   if (width <= 0) return ''
-  return chars.length <= width ? text : `${chars.slice(0, width - 1).join('')}…`
+  return chars.length <= width ? chars.join('') : `${chars.slice(0, width - 1).join('')}…`
 }
 
 export function ago(ms) {
@@ -65,7 +76,7 @@ function clock(ms) {
  * @param state what readBoard answered
  * @param options `columns`, `now` (ms), `color` (boolean), `workspace` (a name for the header)
  */
-export function render(state, { columns, now, color, workspace }) {
+export function render(state, { columns, now, color, workspace, isStale = false }) {
   const paint = (style, text) => {
     if (!color || !style) return text
     const [on, off] = STYLES[style]
@@ -76,7 +87,7 @@ export function render(state, { columns, now, color, workspace }) {
 
   const shown = state.kind === 'ok' ? state : state.lastGood
   const updated = shown ? ` · updated ${clock(shown.mtimeMs)}` : ''
-  line(`⚛ watchmen · ${workspace}${updated}`, 'bold')
+  line(`⚛ watchmen · ${workspace}${isStale ? ' (stale)' : ''}${updated}`, 'bold')
   lines.push('')
 
   if (state.kind === 'missing') {
@@ -101,7 +112,10 @@ export function render(state, { columns, now, color, workspace }) {
       const note = one.note ? ` — ${one.note}` : ''
       const when = typeof one.changedAt === 'number' ? ` · ${ago(now - one.changedAt)}` : ''
       line(`${mark} ${kind}${one.title}${note}${when}`, one.isChanged ? 'bold' : undefined, '  ')
-      if (one.isAwaitingApproval === true) line(`awaiting approval: /watchmen approve ${one.id}`, 'yellow', '    ')
+      if (one.isAwaitingApproval === true) {
+        const hash = typeof one.approvalHash === 'string' ? ` ${one.approvalHash}` : ''
+        line(`awaiting approval: /watchmen approve ${one.id}${hash}`, 'yellow', '    ')
+      }
       if (typeof one.checkError === 'string') line(`check failed: ${one.checkError}`, 'red', '    ')
       if (typeof one.link === 'string') line(one.link, 'dim', '    ')
     }
@@ -112,15 +126,35 @@ export function render(state, { columns, now, color, workspace }) {
   return lines
 }
 
+/** The directory of the pane herdr opened this panel from, if herdr says. */
+export function herdrPaneCwd(env) {
+  try {
+    const context = JSON.parse(env.HERDR_PLUGIN_CONTEXT_JSON ?? '')
+    for (const key of ['focused_pane_cwd', 'workspace_cwd', 'cwd']) {
+      if (typeof context?.[key] === 'string' && context[key].startsWith('/')) return context[key]
+    }
+  } catch {}
+  return undefined
+}
+
+/** Reads the launcher's pointer: the watch folder on the first line, its process id on the second. */
+export function readPointer(text) {
+  const [folder = '', pid = ''] = String(text).split('\n').map(line => line.trim())
+  if (!folder.startsWith('/')) return undefined
+  return { folder, ...(/^[0-9]+$/.test(pid) ? { pid: Number(pid) } : {}) }
+}
+
 /**
- * Where the board is. The herdr panel opens in whatever tab is focused, so its cwd says little:
- * an explicit argument wins, then WATCHMEN_BOARD, then a .companion folder in the cwd, then the
- * folder the last `watchmen` started in, which the launcher records in the pointer file.
+ * Where the board is. A herdr panel starts in the plugin's own folder, so its cwd says little:
+ * an explicit argument wins, then WATCHMEN_BOARD, then the nearest board above the pane herdr
+ * opened the panel from, then a .companion folder in the cwd (not the plugin's own folder), then
+ * the folder the last `watchmen` started in, which the launcher records in the pointer file.
  *
- * @param io `arg`, `env`, `cwd`, `home`, and the lookups `isDir(path)`, `exists(path)`, `read(path)`
- * @returns `{ file, source }`, source naming the rule that chose it
+ * @param io `arg`, `env`, `cwd`, `home`, `pluginRoot`, and the lookups `isDir(path)`,
+ *           `exists(path)`, `read(path)`
+ * @returns `{ file, source }`, source naming the rule that chose it, and `pid` for the pointer
  */
-export function resolveBoardPath({ arg, env, cwd, home, isDir, exists, read }) {
+export function resolveBoardPath({ arg, env, cwd, home, pluginRoot, isDir, exists, read }) {
   const join = (...parts) => parts.join('/').replace(/\/+/g, '/')
   const inFolder = folder => join(folder, '.companion', 'board.json')
   const absolute = path => (path.startsWith('/') ? path : join(cwd, path))
@@ -132,11 +166,37 @@ export function resolveBoardPath({ arg, env, cwd, home, isDir, exists, read }) {
     const path = absolute(env.WATCHMEN_BOARD)
     return { file: isDir(path) ? inFolder(path) : path, source: 'WATCHMEN_BOARD' }
   }
-  if (isDir(join(cwd, '.companion'))) return { file: inFolder(cwd), source: 'cwd' }
-  const pointer = join(env.XDG_STATE_HOME || join(home, '.local', 'state'), 'watchmen', 'current')
-  if (exists(pointer)) {
-    const folder = read(pointer).trim()
-    if (folder.startsWith('/')) return { file: inFolder(folder), source: 'pointer' }
+  const paneCwd = herdrPaneCwd(env)
+  if (paneCwd) {
+    for (let dir = paneCwd.replace(/\/+$/, '') || '/'; ; dir = dir.slice(0, dir.lastIndexOf('/')) || '/') {
+      if (exists(inFolder(dir))) return { file: inFolder(dir), source: 'herdr pane' }
+      if (dir === '/') break
+    }
   }
-  return { file: inFolder(cwd), source: 'cwd' }
+  const isPluginRoot = pluginRoot !== undefined && cwd.replace(/\/+$/, '') === pluginRoot.replace(/\/+$/, '')
+  if (!isPluginRoot && isDir(join(cwd, '.companion'))) return { file: inFolder(cwd), source: 'cwd' }
+  const pointerFile = join(env.XDG_STATE_HOME || join(home, '.local', 'state'), 'watchmen', 'current')
+  const pointer = exists(pointerFile) ? readPointer(read(pointerFile)) : undefined
+  if (pointer) return { file: inFolder(pointer.folder), source: 'pointer', ...(pointer.pid ? { pid: pointer.pid } : {}) }
+  return { file: inFolder(paneCwd ?? cwd), source: 'cwd' }
+}
+
+/**
+ * Starts a directory watch that gives itself up on error: it closes and calls `onLost`, so the
+ * caller drops it and its poll carries on. Answers undefined when the watch cannot start.
+ *
+ * @param watch `fs.watch`, or a stand-in in tests
+ */
+export function startWatch(watch, dir, onChange, onLost) {
+  let watching
+  try {
+    watching = watch(dir, onChange)
+  } catch {
+    return undefined
+  }
+  watching.on('error', () => {
+    watching.close()
+    onLost(watching)
+  })
+  return watching
 }

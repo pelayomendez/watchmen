@@ -9,7 +9,7 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 decision="OPEN"
 panes="$("$herdr_bin" pane list 2>/dev/null || true)"
 if [ -n "$panes" ]; then
-  decision="$(printf '%s' "$panes" | node "$script_dir/herdr-board-decision.mjs" 2>/dev/null || echo OPEN)"
+  decision="$(printf '%s' "$panes" | node "$script_dir/herdr-board-decide.mjs" 2>/dev/null || echo OPEN)"
 fi
 
 # The decision script prints only ids that pass its argv guard; check again before using one.

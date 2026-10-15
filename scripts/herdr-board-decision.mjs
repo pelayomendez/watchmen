@@ -30,9 +30,3 @@ export function decide(json) {
   return board.pane_id === focused.pane_id ? `CLOSE ${board.pane_id}` : `FOCUS ${board.pane_id}`
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
-  let input = ''
-  process.stdin.setEncoding('utf8')
-  process.stdin.on('data', chunk => (input += chunk))
-  process.stdin.on('end', () => process.stdout.write(decide(input)))
-}

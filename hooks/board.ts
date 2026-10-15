@@ -175,7 +175,7 @@ export function itemLine(item: Item): string {
   const kind = item.kind ? `[${item.kind}] ` : ''
   const note = item.note ? ` — ${item.note}` : ''
   const trouble = item.isAwaitingApproval
-    ? ` ⚠ check awaiting approval: /watchmen approve ${item.id}`
+    ? ` ⚠ check awaiting approval: /watchmen approve ${item.id} ${item.approvalHash ?? ''}`.trimEnd()
     : item.checkError
       ? ` ⚠ check failed: ${item.checkError}`
       : ''
