@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# Start the nightwatch: one named, long-lived Claude Code session that keeps the watch over the
+# work in the current directory. Other sessions reach it as "nightwatch".
+#
+# Usage: nightwatch [first prompt]   (default: "Begin the watch.")
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")")/.." && pwd)"
+
+# The ambient-companion skill is the watch's process. Look where its two install routes put it,
+# then in a local clone of pelayo-skills.
+find_skill() {
+  local candidates=(
+    "${NIGHTWATCH_SKILL:-}"
+    "$HOME/.claude/skills/ambient-companion/SKILL.md"
+    "$HOME/.agents/skills/ambient-companion/SKILL.md"
+    "$HOME/Development/pelayomendez/pelayo-skills/skills/productivity/ambient-companion/SKILL.md"
+  )
+  local found
+  found=$(ls -d "$HOME"/.claude/plugins/cache/*/pelayo-skills/*/skills/productivity/ambient-companion/SKILL.md 2>/dev/null | tail -1 || true)
+  [ -n "$found" ] && candidates+=("$found")
+  for path in "${candidates[@]}"; do
+    [ -n "$path" ] && [ -f "$path" ] && { echo "$path"; return; }
+  done
+}
+
+skill=$(find_skill || true)
+if [ -z "$skill" ]; then
+  echo "nightwatch: ambient-companion skill not found; install it with:" >&2
+  echo "  npx skills@latest add pelayomendez/pelayo-skills" >&2
+fi
+
+mkdir -p .companion
+handoff=$(ls .companion/handoff-*.md 2>/dev/null | sort | tail -1 || true)
+
+if [ -n "$skill" ]; then
+  skill_line="Your process is the ambient-companion skill at $skill. Read it and follow its steps."
+else
+  skill_line="The ambient-companion skill was not found. Tell the human, and work from the handoff alone until it is installed."
+fi
+if [ -n "$handoff" ]; then
+  handoff_line="The last watch left its handoff at $handoff. Read it before anything else, then check every item in it against evidence."
+else
+  handoff_line="There is no handoff in .companion/ yet. Start by asking the human for the work, its sources and the charter, one at a time."
+fi
+briefing="$(cat "$ROOT/prompts/persona.md")
+
+$skill_line
+
+$handoff_line"
+
+if [ -n "${NIGHTWATCH_PRINT_BRIEFING:-}" ]; then
+  printf '%s\n' "$briefing"
+  exit 0
+fi
+
+export NIGHTWATCH=1
+export NIGHTWATCH_SKILL="$skill"
+
+exec claude --name nightwatch --plugin-dir "$ROOT" --append-system-prompt "$briefing" "${@:-Begin the watch.}"

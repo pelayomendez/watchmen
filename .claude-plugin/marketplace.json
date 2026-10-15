@@ -1,0 +1,5 @@
+{
+  "name": "nightwatch",
+  "owner": { "name": "Pelayo Méndez", "url": "https://github.com/pelayomendez" },
+  "plugins": [{ "name": "nightwatch", "source": "./" }]
+}
