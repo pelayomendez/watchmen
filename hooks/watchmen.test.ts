@@ -2,7 +2,7 @@ import type { On } from 'claude-code'
 import { expect, mock, test } from 'claude-code/testing'
 
 import type { Item } from '../types'
-import { applyCheck, applyToBoard, approvalLines, attempt, dueChecks, move, parse, parseBoard, serialize, statusLine, summary, track } from './board'
+import { applyCheck, applyToBoard, approvalLines, attempt, dueChecks, sidebarToken, move, parse, parseBoard, serialize, statusLine, summary, track } from './board'
 import { newestBackupOf, newestHandoff } from './register'
 
 const MIN = 60_000
@@ -449,4 +449,31 @@ test('the command awaiting approval is shown clean, above the line that approves
 test('the newest backup is found by its time, not by its name\'s order', () => {
   expect(newestBackupOf(['board.json.900.bak', 'board.json.1000.bak', 'board.json', 'handoff-1.md'])).toBe('board.json.1000.bak')
   expect(newestBackupOf(['board.json'])).toBeUndefined()
+})
+
+test('the sidebar token says what needs you, else what changed, else that it is quiet', () => {
+  expect(sidebarToken([{ id: 'a', title: 'A', lane: 'needs-you' }, { id: 'b', title: 'B', lane: 'needs-you' }])).toBe('⚛ 2 need you')
+  expect(sidebarToken([{ id: 'a', title: 'A', lane: 'moving', isChanged: true }])).toBe('⚛ 1 changed')
+  expect(sidebarToken([])).toBe('⚛ quiet')
+})
+
+test('inside herdr the watch publishes its token to the spaces sidebar, with a time to live', async ($, on) => {
+  mock.env(on, { WATCHMEN: '1', HERDR_WORKSPACE_ID: 'w1', HERDR_BIN_PATH: '/opt/herdr/bin/herdr' })
+  const seen = engine(on, { '.companion/board.json': serialize([{ id: 'deck', title: 'Deck', lane: 'needs-you' }]) }, 10)
+  await $.session.start(START)
+  await seen.clock.settle()
+  expect(seen.runs[0]).toEqual([
+    '/opt/herdr/bin/herdr', 'workspace', 'report-metadata', '--source', 'watchmen',
+    '--token', 'watchmen=⚛ 1 need you', '--ttl-ms', '45000', 'w1',
+  ])
+  await seen.clock.advance(15_000)
+  expect(seen.runs).toHaveLength(2)
+})
+
+test('an unsafe herdr workspace id publishes nothing', async ($, on) => {
+  mock.env(on, { WATCHMEN: '1', HERDR_WORKSPACE_ID: '--all' })
+  const seen = engine(on, {}, 10)
+  await $.session.start(START)
+  await seen.clock.advance(MIN)
+  expect(seen.runs).toEqual([])
 })

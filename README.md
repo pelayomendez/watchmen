@@ -105,6 +105,15 @@ description = "summon the watch"
 
 `watchmen` labels its own pane `watchmen` when it starts inside herdr (`herdr pane rename`); that label is how the action finds it.
 
+**Follow mode.** Summoning turns it on: from then on, each tab you focus in the same space brings the watch beside you there as a right split, and your own pane keeps focus. Sending the watch home turns it off. It is a `tab.focused` event hook in the manifest (`scripts/herdr-follow.mjs`): it skips the tab the watch is already in and its own `watchmen` tab, stays within its space, ignores rapid switches but the last (150 ms), never moves the pane twice at once, and turns follow off once the watch pane is gone. The state lives in `${XDG_STATE_HOME:-~/.local/state}/watchmen/follow`.
+
+**In the spaces sidebar.** Inside herdr the watch publishes a short token for its space, `$watchmen` (`⚛ 2 need you`, `⚛ 1 changed`, `⚛ quiet`), refreshed every 15 seconds with a 45-second time to live, so it disappears soon after the watch stops. Show it by adding the token to the sidebar's space rows in `~/.config/herdr/config.toml`:
+
+```toml
+[ui.sidebar.spaces]
+rows = [["state_icon", "workspace"], ["branch", "git_status"], ["$watchmen"]]
+```
+
 A secondary action, `watchmen.toggle-board`, opens the read-only board list in a split instead; bind it too if you want the list without the conversation. Without the plugin, run `watchmen board` in a pane of its own.
 
 ## Layout

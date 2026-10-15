@@ -17,6 +17,8 @@ import {
   move,
   parseBoard,
   serialize,
+  sidebarToken,
+  isSafeHerdrArg,
   statusLine,
   summary,
   track,
@@ -33,6 +35,8 @@ const HANDOFF_PREFIX = 'handoff-'
 const BOARD_FILE = `${HANDOFF_DIR}/board.json`
 const BOARD_TEMP = `${BOARD_FILE}.tmp`
 const TICK_MS = 15_000
+// Three ticks: the sidebar token outlives one missed refresh, not a watch that has ended.
+const SIDEBAR_TTL_MS = 45_000
 const HANDOFF_AT = 75
 const PANE = 'board'
 const PANE_TITLE = '⚛ watchmen'
@@ -238,6 +242,25 @@ async function runCheck($: EngineInterface, item: Item, now: number) {
   }
 }
 
+/** Inside herdr, the workspace and binary the sidebar token is published through. */
+async function herdrOf($: EngineInterface): Promise<{ herdr?: { bin: string; workspace: string } }> {
+  const workspace = await $.env.get('HERDR_WORKSPACE_ID')
+  const bin = (await $.env.get('HERDR_BIN_PATH')) || 'herdr'
+  return isSafeHerdrArg(workspace, 'id') && isSafeHerdrArg(bin, 'bin') ? { herdr: { bin, workspace } } : {}
+}
+
+/**
+ * Shows the watch in herdr's always-visible spaces sidebar as the workspace token `$watchmen`.
+ * Every tick refreshes it with a time to live, so it disappears soon after the watch stops.
+ */
+async function publishSidebar($: EngineInterface, herdr: { bin: string; workspace: string }, items: readonly Item[]) {
+  const argv = [
+    herdr.bin, 'workspace', 'report-metadata', '--source', 'watchmen',
+    '--token', `watchmen=${sidebarToken(items)}`, '--ttl-ms', String(SIDEBAR_TTL_MS), herdr.workspace,
+  ]
+  await $.process.run(argv).catch(() => undefined)
+}
+
 async function tick($: EngineInterface) {
   const watch = (await $.state.get(WATCH)).value
   if (!watch) return
@@ -246,6 +269,7 @@ async function tick($: EngineInterface) {
   for (const item of dueChecks(items, now, running)) {
     void runCheck($, item, now).catch(error => $.ui.log(`watchmen: check ${item.id} failed: ${String(error)}`))
   }
+  if (watch.herdr) void publishSidebar($, watch.herdr, items)
   const { context } = await $.session.usage()
   const percent = context.percent ?? 0
   $.ui.status(statusLine(items, context.percent, now - watch.startedAt, HANDOFF_AT))
@@ -274,6 +298,7 @@ export const register: Register = on => {
       watch = {
         handoff: latest && `${HANDOFF_DIR}/${latest}`,
         skill: (await $.env.get('WATCHMEN_SKILL')) || undefined,
+        ...(await herdrOf($)),
         startedAt: await $.clock.now(),
         warned: false,
         ...(boardError ? { boardError } : {}),

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -66,7 +66,9 @@ if [ "$1 $2" = "pane split" ]; then echo '{"result":{"type":"pane_created","pane
       env: { ...process.env, HERDR_BIN_PATH: bin, FAKE_PANES: join(dir, 'panes.json'), FAKE_LOG: join(dir, 'log'), XDG_STATE_HOME: state },
       encoding: 'utf8',
     })
-    return { status: run.status, stderr: run.stderr, calls: readFileSync(join(dir, 'log'), 'utf8').trim().split('\n').filter(Boolean) }
+    const followFile = join(state, 'watchmen', 'follow')
+    const follow = existsSync(followFile) ? readFileSync(followFile, 'utf8').trim() : undefined
+    return { status: run.status, stderr: run.stderr, follow, calls: readFileSync(join(dir, 'log'), 'utf8').trim().split('\n').filter(Boolean) }
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
@@ -81,6 +83,7 @@ test('the summon script spawns, brings and sends through the herdr CLI', () => {
     'herdr pane rename w1:p9 watchmen',
   ])
   assert.match(spawned.calls[2], /^herdr pane run w1:p9 .*bin\/watchmen$/)
+  assert.equal(spawned.follow, 'on')
 
   // With no pointer, the focused pane's folder, spaces and all.
   const spaced = mkdtempSync(join(tmpdir(), 'my app '))
@@ -93,9 +96,11 @@ test('the summon script spawns, brings and sends through the herdr CLI', () => {
 
   const brought = summon(list(pane('w1:p1', 'w1:t1', { focused: true }), pane('w1:p7', 'w1:t3', WATCH)))
   assert.deepEqual(brought.calls, ['herdr pane move w1:p7 --tab w1:t1 --target-pane w1:p1 --split right --ratio 0.35 --label watchmen --focus'])
+  assert.equal(brought.follow, 'on')
 
   const sent = summon(list(pane('w1:p1', 'w1:t1', { focused: true }), pane('w1:p7', 'w1:t1', WATCH)))
   assert.deepEqual(sent.calls, ['herdr pane move w1:p7 --new-tab --tab-label watchmen --label watchmen --no-focus'])
+  assert.equal(sent.follow, 'off')
 })
 
 test('the summon script does nothing on garbage and says why', () => {
@@ -103,4 +108,5 @@ test('the summon script does nothing on garbage and says why', () => {
   assert.notEqual(run.status, 0)
   assert.match(run.stderr, /watchmen summon: pane list is not JSON/)
   assert.deepEqual(run.calls, [])
+  assert.equal(run.follow, undefined)
 })

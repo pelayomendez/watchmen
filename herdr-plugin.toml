@@ -30,3 +30,11 @@ platforms = ["linux", "macos"]
 title = "Toggle the watch board"
 description = "Open the watch board beside the current pane, focus it, or close it."
 command = ["bash", "scripts/herdr-toggle-board.sh"]
+
+# Follow mode: while it is on (summon turns it on, sending the watch home turns it off), each tab
+# you focus brings the watch beside you there, without taking focus. herdr runs the hook once per
+# event and hands it HERDR_PLUGIN_EVENT_JSON; the script debounces and locks on its own.
+[[events]]
+on = "tab.focused"
+platforms = ["linux", "macos"]
+command = ["node", "scripts/herdr-follow.mjs"]
