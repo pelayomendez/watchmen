@@ -80,7 +80,7 @@ export function dueChecks(items: readonly Item[], now: number, running: Readonly
       one.check &&
       one.lane !== 'done' &&
       !running.has(one.id) &&
-      (one.checkedAt === undefined || now - one.checkedAt >= checkInterval(one.check)),
+      (one.checkedAt === undefined || one.checkedAt > now || now - one.checkedAt >= checkInterval(one.check)),
   )
 }
 
