@@ -72,6 +72,13 @@ mkdir -p .companion
 # this process's id, which exec hands to claude, so the viewer can tell when the watch has ended.
 state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/watchmen"
 mkdir -p "$state_dir" && printf '%s\n%s\n' "$PWD" "$$" > "$state_dir/current"
+# Inside herdr, label this pane so the summon action can find the watch from any tab.
+if [ -n "${HERDR_PANE_ID:-}" ]; then
+  case "$HERDR_PANE_ID" in
+    -*|*[!A-Za-z0-9_:.-]*) ;;
+    *) "${HERDR_BIN_PATH:-herdr}" pane rename "$HERDR_PANE_ID" watchmen >/dev/null 2>&1 || true ;;
+  esac
+fi
 export WATCHMEN=1
 export WATCHMEN_SKILL="$skill"
 

@@ -1,5 +1,5 @@
-# watchmen as a herdr plugin: the watch board in a split pane beside whatever tab you are on,
-# toggled by a key. No build step: the viewer is a Node script with no dependencies.
+# watchmen as a herdr plugin: the watchmen session summoned beside whatever tab you are on, and
+# the read-only board list as a secondary split. No build step: the viewer is a Node script with no dependencies.
 
 id = "watchmen"
 name = "watchmen"
@@ -14,6 +14,16 @@ title = "⚛ watchmen"
 placement = "split"
 command = ["node", "bin/watchmen-board"]
 
+# The action to bind: the watchmen session itself, summoned beside you from any tab and sent back
+# to a tab of its own on a second press, still running.
+[[actions]]
+id = "summon"
+platforms = ["linux", "macos"]
+title = "Summon the watch"
+description = "Bring the watchmen session beside the current pane, start it if none runs, or send it back to its own tab."
+command = ["bash", "scripts/herdr-summon.sh"]
+
+# Secondary: the read-only board list in a split.
 [[actions]]
 id = "toggle-board"
 platforms = ["linux", "macos"]
