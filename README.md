@@ -78,7 +78,7 @@ It finds the board in this order: a path given as an argument; `WATCHMEN_BOARD`;
 
 ## In herdr
 
-The repo is also a [herdr](https://herdr.dev) plugin (macOS and Linux, herdr 0.9 or later): the board opens as a split pane beside whatever tab you are on, toggled by a key, and needs no build step.
+The repo is also a [herdr](https://herdr.dev) plugin (macOS and Linux, herdr 0.9 or later). Its main action, `summon`, brings the watchmen session itself beside you, from whatever tab you are on: the companion follows you between your session tabs.
 
 Install it from GitHub, or link a clone:
 
@@ -91,14 +91,21 @@ Bind a key in `~/.config/herdr/config.toml`:
 
 ```toml
 [[keys.command]]
-key = "prefix+w"
+key = "prefix+m"
 type = "plugin_action"
-command = "watchmen.toggle-board"
+command = "watchmen.summon"
+description = "summon the watch"
 ```
 
-The key opens the board beside the focused pane, focuses it if it is already open in that tab, and closes it when it is the focused pane.
+`prefix+m` summons the companion beside you, and a second press sends it back:
 
-A layout that works: one tab running `watchmen` (the session you talk to), your working sessions in the tabs beside it, and the board toggled open next to whichever session you are in. Without the plugin, run `watchmen board` in a pane of its own.
+- no watch running: it splits the current tab on the right and starts `watchmen` there, in the folder of the last watch or else the current pane's;
+- the watch runs in another tab: it moves into the current tab as a right split, focused;
+- the watch is in the current tab: it goes back to a tab of its own labelled "watchmen", still running.
+
+`watchmen` labels its own pane `watchmen` when it starts inside herdr (`herdr pane rename`); that label is how the action finds it.
+
+A secondary action, `watchmen.toggle-board`, opens the read-only board list in a split instead; bind it too if you want the list without the conversation. Without the plugin, run `watchmen board` in a pane of its own.
 
 ## Layout
 
@@ -110,7 +117,7 @@ A layout that works: one tab running `watchmen` (the session you talk to), your 
 | `hooks/register.tsx` | Wiring: state, timer, checks, tools, `/watchmen`, the pane, the status line |
 | `hooks/watchmen.test.ts` | `claude plugin test .` |
 | `bin/watchmen-board`, `bin/board-render.mjs` | The read-only board viewer and its pure rendering |
-| `herdr-plugin.toml`, `scripts/herdr-*` | The herdr plugin: the board pane and its toggle |
+| `herdr-plugin.toml`, `scripts/herdr-*` | The herdr plugin: summon the session, toggle the board list |
 | `test/*.test.mjs` | `node --test test/*.test.mjs` |
 
 Why the persona is in the launcher and not the plugin: Claude Code's built-in security plugin bypasses a user-installed plugin's changes to the system prompt, so the launcher passes it with `--append-system-prompt`.
