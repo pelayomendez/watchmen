@@ -1,0 +1,22 @@
+# watchmen as a herdr plugin: the watch board in a split pane beside whatever tab you are on,
+# toggled by a key. No build step: the viewer is a Node script with no dependencies.
+
+id = "watchmen"
+name = "watchmen"
+version = "0.2.0"
+description = "The watch board: what needs you, what is moving, what is waiting, beside your sessions."
+min_herdr_version = "0.9.0"
+platforms = ["linux", "macos"]
+
+[[panes]]
+id = "board"
+title = "⚛ watchmen"
+placement = "split"
+command = ["node", "bin/watchmen-board"]
+
+[[actions]]
+id = "toggle-board"
+platforms = ["linux", "macos"]
+title = "Toggle the watch board"
+description = "Open the watch board beside the current pane, focus it, or close it."
+command = ["bash", "scripts/herdr-toggle-board.sh"]

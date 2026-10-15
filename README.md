@@ -70,7 +70,35 @@ The model's tools are `board_track`, `board_move`, `board_drop` and `board_chang
 - **Toasts**: one when an item changes, one when the watch runs long.
 - **`/watchmen`** opens the pane and prints the board; `/watchmen brief` prints it grouped by lane; `/watchmen track <title>` adds a todo to needs-you; `/watchmen approve <id>` lets an item's check run; `/watchmen reload` and `/watchmen reset` recover from an unreadable board.json.
 
-In [herdr](https://herdr.dev), give the watch its own tab and keep your working sessions in the others.
+## The board outside Claude
+
+`watchmen board` is a read-only viewer of `.companion/board.json` for a terminal of its own: lanes in order (NEEDS YOU, MOVING, WAITING, DONE as a count), each item with its label, note, how long ago it changed, its link, and a failing or unapproved check. It redraws when the file changes and when the terminal resizes, never writes, respects `NO_COLOR`, and exits cleanly on Ctrl-C. `--once` prints the board and exits.
+
+It finds the board in this order: a path given as an argument, `WATCHMEN_BOARD`, a `.companion` folder in the current directory, then the folder the last `watchmen` started in (the launcher records it in `${XDG_STATE_HOME:-~/.local/state}/watchmen/current`).
+
+## In herdr
+
+The repo is also a [herdr](https://herdr.dev) plugin (macOS and Linux, herdr 0.9 or later): the board opens as a split pane beside whatever tab you are on, toggled by a key, and needs no build step.
+
+Install it from GitHub, or link a clone:
+
+```bash
+herdr plugin install pelayomendez/watchmen
+herdr plugin link ~/path/to/watchmen
+```
+
+Bind a key in `~/.config/herdr/config.toml`:
+
+```toml
+[[keys.command]]
+key = "prefix+w"
+type = "plugin_action"
+command = "watchmen.toggle-board"
+```
+
+The key opens the board beside the focused pane, focuses it if it is already open in that tab, and closes it when it is the focused pane.
+
+A layout that works: one tab running `watchmen` (the session you talk to), your working sessions in the tabs beside it, and the board toggled open next to whichever session you are in. Without the plugin, run `watchmen board` in a pane of its own.
 
 ## Layout
 
@@ -81,6 +109,9 @@ In [herdr](https://herdr.dev), give the watch its own tab and keep your working 
 | `hooks/board.ts` | The board's rules: tracking, checks, change detection, lanes |
 | `hooks/register.tsx` | Wiring: state, timer, checks, tools, `/watchmen`, the pane, the status line |
 | `hooks/watchmen.test.ts` | `claude plugin test .` |
+| `bin/watchmen-board`, `bin/board-render.mjs` | The read-only board viewer and its pure rendering |
+| `herdr-plugin.toml`, `scripts/herdr-*` | The herdr plugin: the board pane and its toggle |
+| `test/*.test.mjs` | `node --test test/*.test.mjs` |
 
 Why the persona is in the launcher and not the plugin: Claude Code's built-in security plugin bypasses a user-installed plugin's changes to the system prompt, so the launcher passes it with `--append-system-prompt`.
 
