@@ -170,12 +170,29 @@ export function statusLine(items: readonly Item[], percent: number | undefined, 
   return parts.join(' · ')
 }
 
+/** Removes control characters and DEL, so text from a board.json cannot drive the terminal. */
+export function sanitize(text: string): string {
+  return text.replace(/[\t\n\r\v\f]/g, ' ').replace(/[\u0000-\u001f\u007f-\u009f]/g, '')
+}
+
+/**
+ * What an item awaiting approval shows under it: the exact command first, then how to approve
+ * that command, so the human reads what they are approving before the line they copy.
+ */
+export function approvalLines(item: Item): string[] {
+  if (!item.isAwaitingApproval || !item.check) return []
+  return [
+    `would run: ${sanitize(JSON.stringify(item.check.argv))}`,
+    sanitize(`to approve: /watchmen approve ${item.id} ${item.approvalHash ?? ''}`).trimEnd(),
+  ]
+}
+
 export function itemLine(item: Item): string {
   const mark = item.isChanged ? '◆' : '•'
   const kind = item.kind ? `[${item.kind}] ` : ''
   const note = item.note ? ` — ${item.note}` : ''
   const trouble = item.isAwaitingApproval
-    ? ` ⚠ check awaiting approval: /watchmen approve ${item.id} ${item.approvalHash ?? ''}`.trimEnd()
+    ? ' ⚠ check awaiting approval'
     : item.checkError
       ? ` ⚠ check failed: ${item.checkError}`
       : ''
@@ -194,7 +211,7 @@ export function summary(items: readonly Item[]): string {
         `${LANE_TITLES[lane]} (${inLane.length})`,
         ...inLane.flatMap(one => [
           `  ${itemLine(one)}  {${one.id}}`,
-          ...(one.isAwaitingApproval && one.check ? [`      would run: ${JSON.stringify(one.check.argv)}`] : []),
+          ...approvalLines(one).map(line => `      ${line}`),
         ]),
       ].join('\n'),
     )

