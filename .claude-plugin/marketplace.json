@@ -1,5 +1,6 @@
 {
   "name": "watchmen",
+  "description": "watchmen: a companion Claude Code session that keeps a board of your tickets, MRs and sessions.",
   "owner": { "name": "Pelayo Méndez", "url": "https://github.com/pelayomendez" },
   "plugins": [{ "name": "watchmen", "source": "./" }]
 }

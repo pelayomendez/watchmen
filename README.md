@@ -2,53 +2,90 @@
 
 > *Quis custodiet ipsos custodes?* Who watches the watchmen? Here: you do, through the charter.
 
-One long-lived Claude Code session that keeps the watch over your work while other sessions come and go.
+An assistant session that runs beside your working sessions and keeps track of everything going on: the tickets you own, the merge requests waiting on review, the worker sessions implementing slices, the todos you handed it. It tells you what needs you, what is moving, and what is waiting, and stays quiet otherwise.
 
-It runs the [`ambient-companion`](https://github.com/pelayomendez/pelayo-skills/tree/main/skills/productivity/ambient-companion) process: it watches the work's event streams, moves each item through workers and independent review, and brings you only the decisions, under a charter of what it may do alone, must ask first, and never does.
+```
+ your work sessions                    watchmen (always open, beside them)
+ ┌─ NRV-11249 ─────────┐               ┌─ ⚛ watchmen ──────────────────────────┐
+ │ implementing…       │               │ Needs you (2)                          │
+ └─────────────────────┘               │   ◆ [mr] !412 frames — 2 new comments  │
+ ┌─ NRV-12513 ─────────┐               │   • [todo] Review deck v3              │
+ │ waiting on backend  │               │ Moving (1)                             │
+ └─────────────────────┘               │   • [session] NRV-11249 — slice 2/4    │
+     Jira · GitLab · handoffs ───────▶ │ Waiting (1)                            │
+                                       │   • [jira] NRV-11560 — backend fields  │
+                                       └────────────────────────────────────────┘
+```
 
-## The idea
-
-A calm observer that stands a little outside the work and sees it across time: the handoff the last watch left, the streams moving now, the sessions running beside it. It speaks briefly and only when something needs you. It never writes the product code; workers do.
-
-In the status line it shows as `⚛ watchmen · 42% · 3h07`: how full the context window is, and how long this watch has been held. At 75% it asks for a handoff before the window fills, because a watch that runs too long forgets what it saw.
+It runs the [`ambient-companion`](https://github.com/pelayomendez/pelayo-skills/tree/main/skills/productivity/ambient-companion) process under a charter of what it may do alone, must ask first, and never does. It never writes product code and never acts in your other sessions; it watches, sorts, and asks.
 
 ## Use it
 
 ```bash
 git clone https://github.com/pelayomendez/watchmen
 npx skills@latest add pelayomendez/pelayo-skills   # the ambient-companion skill
+ln -s "$PWD/watchmen/bin/watchmen" ~/.local/bin/watchmen
 cd <your workspace>
-<path-to>/watchmen/bin/watchmen
+watchmen
 ```
 
-The launcher:
+Or install the plugin alone with `/plugin install watchmen --marketplace pelayomendez/watchmen`; the launcher is still what starts the watch.
 
-- starts a session named `watchmen` (`claude --name watchmen`), so your other sessions can message it by that name;
-- briefs it with the persona, the newest `.companion/handoff-*.md` in the workspace, and where the skill lives;
-- loads this plugin, which shows the watch in the status line, warns once when the context runs long, and adds `/watchmen` to show what the watch holds.
+The launcher starts a session named `watchmen`, briefs it with the persona, the newest `.companion/handoff-*.md` and where the skill lives, and loads this plugin. The plugin stays silent in every session the launcher did not start, so it is safe to install globally.
 
-The plugin stays silent in every session the launcher did not start, so it is safe to install globally.
+`WATCHMEN_PRINT_BRIEFING=1 watchmen` prints the briefing without starting a session.
 
-In [herdr](https://herdr.dev), give the watch its own tab: run `watchmen` there and keep your working sessions in the others.
+## The board
+
+Items are deliberately loose. An item is a title in a lane, with an optional free `kind` label, note, link, and **check**: any host command whose output tells the item's state. watchmen knows nothing about Jira or GitLab; the check does.
+
+| Lane | Means |
+|---|---|
+| `needs-you` | you must act or decide |
+| `moving` | it advances without you |
+| `waiting` | it waits on someone else |
+| `done` | kept until dropped; no longer checked |
+
+Every 15 seconds the plugin runs the checks that are due (each on its own interval: 5 minutes by default, never under 1 minute, never two at once). The first output is the baseline. When a later output differs, the item is marked changed (◆), a toast says so, and the watch calls `board_changes` and triages: it moves the item to its lane with a one-line note. A failing check only writes the failure into the note.
+
+Tell the watch what to track in plain words ("keep an eye on NRV-123 and MR 42"), and it adds items with `board_track`. Check recipes:
+
+| Track | Check (`argv`) |
+|---|---|
+| A Jira ticket's status | `["acli", "jira", "workitem", "view", "NRV-123", "--fields", "status"]` |
+| A GitLab MR's state and approvals | `["sh", "-c", "glab mr view 42 -F json \| jq -r '[.state, .detailed_merge_status] \| join(\" \")'"]` |
+| A GitHub PR | `["gh", "pr", "view", "7", "--json", "state,reviewDecision", "-q", ".state + \" \" + .reviewDecision"]` |
+| Another session, by its handoff | `["sh", "-c", "tail -1 ../other-repo/.companion/handoff-*.md"]` |
+| A branch moving | `["git", "ls-remote", "origin", "refs/heads/main"]` |
+| A todo | no check: it stays where you put it |
+
+The model's tools are `board_track`, `board_move`, `board_drop` and `board_changes`. The board is kept in `.companion/board.json`, so the next watch picks it up.
+
+## What you see
+
+- **The pane**, `⚛ watchmen`: the lanes with their items, changed ones marked ◆ and bold. It opens by itself beside the transcript in the fullscreen layout; on the main screen, `/watchmen` opens it.
+- **The status line**: `⚛ watchmen · 2 need you · 1 moving · 1 changed · 42% · 3h07`. At 75% context it asks for a handoff before the window fills.
+- **Toasts**: one when an item changes, one when the watch runs long.
+- **`/watchmen`** opens the pane and prints the board; `/watchmen brief` prints it grouped by lane; `/watchmen track <title>` adds a todo to needs-you.
+
+In [herdr](https://herdr.dev), give the watch its own tab and keep your working sessions in the others.
 
 ## Layout
 
 | Path | What |
 |---|---|
 | `bin/watchmen` | Launcher: finds the skill and the newest handoff, builds the briefing, starts the session |
-| `prompts/persona.md` | Who the watch is |
-| `hooks/register.ts` | Status line, context warning, `/watchmen` |
+| `prompts/persona.md` | Who the watch is, and how it triages the board |
+| `hooks/board.ts` | The board's rules: tracking, checks, change detection, lanes |
+| `hooks/register.tsx` | Wiring: state, timer, checks, tools, `/watchmen`, the pane, the status line |
 | `hooks/watchmen.test.ts` | `claude plugin test .` |
 
 Why the persona is in the launcher and not the plugin: Claude Code's built-in security plugin bypasses a user-installed plugin's changes to the system prompt, so the launcher passes it with `--append-system-prompt`.
 
 ## Next
 
-Ideas taken from similar projects, not built yet:
-
-- **A decision inbox**: each item the watch raises carries the answers it allows (accept, edit, respond, ignore) and stays open until you have seen it.
-- **The status line reads, never computes**: hooks write the watch's state to a file, and a standalone status-line script only reads it.
-- **A two-part handoff**: a hook writes the facts, the model adds the judgement, and the session won't end until the handoff is written.
+- **A decision inbox**: each needs-you item carries the answers it allows (accept, edit, respond, ignore).
+- **A two-part handoff**: a hook writes the board's facts, the model adds the judgement.
 - **Events over polling**: subscribe to herdr's agent events instead of checking on a timer.
 
 ## License
