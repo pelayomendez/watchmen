@@ -322,3 +322,73 @@ export function wakePrompt(
 export function enteredNeedsYou(before: readonly Item[], after: readonly Item[]): Item[] {
   return after.filter(one => one.lane === 'needs-you' && before.find(old => old.id === one.id)?.lane !== 'needs-you')
 }
+
+/** The mascot's mood: calm, something changed, or something needs the person. */
+export type MascotState = 'calm' | 'changed' | 'needs-you'
+
+export function mascotState(items: readonly Item[]): MascotState {
+  if (items.some(one => one.lane === 'needs-you')) return 'needs-you'
+  if (items.some(one => one.isChanged)) return 'changed'
+  return 'calm'
+}
+
+/** One colour per state, shared by the band, the status line, the SVG and the herdr sidebar. */
+export const MASCOT_COLORS: Record<MascotState, string> = {
+  calm: '#4C8DFF',
+  changed: '#F5A524',
+  'needs-you': '#E5484D',
+}
+
+/** Fills the atom's colour slots for a state; on `changed` the electron alone lights up. */
+export function paintAtom(template: string, state: MascotState): string {
+  const color = MASCOT_COLORS[state]
+  const electron = state === 'calm' ? MASCOT_COLORS.calm : color
+  const body = state === 'changed' ? MASCOT_COLORS.calm : color
+  return template.replaceAll('__ORBIT__', body).replaceAll('__NUCLEUS__', body).replaceAll('__ELECTRON__', electron)
+}
+
+export type BandPart = { text: string; color?: string; bold?: boolean; dim?: boolean }
+
+/**
+ * The band's counts, fitted to the columns it has: full words when wide, short words when not,
+ * and the mascot alone at the narrowest. Answers whether the buttons fit too.
+ */
+export function bandLayout(items: readonly Item[], columns: number): { parts: BandPart[]; hasButtons: boolean } {
+  const tally = counts(items)
+  const state = mascotState(items)
+  const mascot: BandPart = { text: '⚛', color: MASCOT_COLORS[state], bold: state === 'needs-you' }
+  const words = columns >= 56
+    ? { need: 'need you', moving: 'moving', waiting: 'waiting' }
+    : { need: 'need', moving: 'mov', waiting: 'wait' }
+  const counted: BandPart[] = [
+    { text: `${tally['needs-you']} ${words.need}`, color: tally['needs-you'] ? MASCOT_COLORS['needs-you'] : undefined, bold: tally['needs-you'] > 0, dim: tally['needs-you'] === 0 },
+    { text: `${tally.moving} ${words.moving}`, color: 'cyan' },
+    { text: `${tally.waiting} ${words.waiting}`, dim: true },
+  ]
+  const line = (parts: BandPart[]) => parts.map(one => one.text).join(' · ').length + 2
+  const hasButtons = columns >= 44
+  const room = columns - (hasButtons ? 18 : 0)
+  if (line(counted) <= room) return { parts: [mascot, ...counted], hasButtons }
+  if (columns >= 12) return { parts: [mascot, counted[0]!], hasButtons: false }
+  return { parts: [mascot], hasButtons: false }
+}
+
+/**
+ * The herdr spaces sidebar, coloured by state: three tokens, of which only the one for the current
+ * state carries text, each styled by its own row entry in herdr's config (SIDEBAR_ROW).
+ */
+export function sidebarTokens(items: readonly Item[]): Record<'watchmen_alert' | 'watchmen_changed' | 'watchmen_quiet', string> {
+  const state = mascotState(items)
+  const text = sidebarToken(items)
+  return {
+    watchmen_alert: state === 'needs-you' ? text : '',
+    watchmen_changed: state === 'changed' ? text : '',
+    watchmen_quiet: state === 'calm' ? text : '',
+  }
+}
+
+/** The row to add to `[ui.sidebar.spaces] rows` in herdr's config.toml (checked with `herdr config check`). */
+export const SIDEBAR_ROW =
+  `[{ token = "$watchmen_alert", fg = "${MASCOT_COLORS['needs-you']}", bold = true }, ` +
+  `{ token = "$watchmen_changed", fg = "${MASCOT_COLORS.changed}" }, ` +
+  `{ token = "$watchmen_quiet", dim = true }]`

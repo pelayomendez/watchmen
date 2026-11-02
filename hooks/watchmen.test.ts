@@ -1,8 +1,9 @@
 import type { On } from 'claude-code'
 import { expect, mock, test } from 'claude-code/testing'
+import type { Engine } from 'claude-code/testing'
 
 import type { Item } from '../types'
-import { applyCheck, applyToBoard, approvalLines, attempt, dueChecks, enteredNeedsYou, queueWake, sidebarToken, wakePrompt, move, parse, parseBoard, serialize, statusLine, summary, track } from './board'
+import { applyCheck, applyToBoard, approvalLines, attempt, dueChecks, enteredNeedsYou, MASCOT_COLORS, mascotState, paintAtom, queueWake, SIDEBAR_ROW, sidebarToken, sidebarTokens, wakePrompt, move, parse, parseBoard, serialize, statusLine, summary, track } from './board'
 import { newestBackupOf, newestHandoff } from './register'
 
 const MIN = 60_000
@@ -175,6 +176,8 @@ function engine(on: On, files: Record<string, string>, percent: number) {
   on('ui.status', ($, e) => (status.push(e.text), { value: undefined }))
   on('ui.toast', ($, e) => (toasts.push(e.text), { value: undefined }))
   on('ui.open', () => ({ value: { isPlaced: true as const } }))
+  // The engine's own band beneath the plugins: nothing drawn.
+  on('ui.render', { component: 'AbovePrompt' }, ($, e) => h($.ui.resolve(e).Box, {}) as never)
   let draft = ''
   on('prompt.read', () => ({ value: { text: draft, cursor: draft.length } }))
   const prompts: string[] = []
@@ -490,7 +493,9 @@ test('inside herdr the watch publishes its token to the spaces sidebar, with a t
   await seen.clock.settle()
   expect(seen.runs[0]).toEqual([
     '/opt/herdr/bin/herdr', 'workspace', 'report-metadata', '--source', 'watchmen',
-    '--token', 'watchmen=⚛ 1 need you', '--ttl-ms', '45000', 'w1',
+    '--token', 'watchmen=⚛ 1 need you',
+    '--token', 'watchmen_alert=⚛ 1 need you', '--clear-token', 'watchmen_changed', '--clear-token', 'watchmen_quiet',
+    '--ttl-ms', '45000', 'w1',
   ])
   await seen.clock.advance(15_000)
   expect(seen.runs).toHaveLength(2)
@@ -611,4 +616,86 @@ test('a change queued while a wake is being submitted is kept for the next wake'
   // The MR's change was not wiped by the first wake: it wakes the watch once three minutes pass.
   await seen.clock.advance(3 * MIN)
   expect(seen.prompts.length).toBeGreaterThan(1)
+})
+
+test('the mascot takes one colour per state, and only the electron lights up on a change', () => {
+  const calm: Item[] = [{ id: 'a', title: 'A', lane: 'moving' }]
+  const changed: Item[] = [{ id: 'a', title: 'A', lane: 'moving', isChanged: true }]
+  const needs: Item[] = [{ id: 'a', title: 'A', lane: 'needs-you' }]
+  expect([mascotState(calm), mascotState(changed), mascotState(needs)]).toEqual(['calm', 'changed', 'needs-you'])
+  expect(MASCOT_COLORS).toEqual({ calm: '#4C8DFF', changed: '#F5A524', 'needs-you': '#E5484D' })
+  const template = '<svg><ellipse stroke="__ORBIT__"/><circle fill="__NUCLEUS__"/><circle fill="__ELECTRON__"/></svg>'
+  expect(paintAtom(template, 'calm')).toBe('<svg><ellipse stroke="#4C8DFF"/><circle fill="#4C8DFF"/><circle fill="#4C8DFF"/></svg>')
+  expect(paintAtom(template, 'changed')).toBe('<svg><ellipse stroke="#4C8DFF"/><circle fill="#4C8DFF"/><circle fill="#F5A524"/></svg>')
+  expect(paintAtom(template, 'needs-you')).toBe('<svg><ellipse stroke="#E5484D"/><circle fill="#E5484D"/><circle fill="#E5484D"/></svg>')
+})
+
+test('the herdr sidebar: one styled token per state carries the text, and the config row to style them', () => {
+  expect(sidebarTokens([{ id: 'a', title: 'A', lane: 'needs-you' }])).toEqual({ watchmen_alert: '⚛ 1 need you', watchmen_changed: '', watchmen_quiet: '' })
+  expect(sidebarTokens([{ id: 'a', title: 'A', lane: 'moving', isChanged: true }])).toEqual({ watchmen_alert: '', watchmen_changed: '⚛ 1 changed', watchmen_quiet: '' })
+  expect(sidebarTokens([])).toEqual({ watchmen_alert: '', watchmen_changed: '', watchmen_quiet: '⚛ quiet' })
+  expect(SIDEBAR_ROW).toBe(
+    '[{ token = "$watchmen_alert", fg = "#E5484D", bold = true }, { token = "$watchmen_changed", fg = "#F5A524" }, { token = "$watchmen_quiet", dim = true }]',
+  )
+})
+
+const BAND_BOARD = serialize([
+  { id: 'n', title: 'N', lane: 'needs-you' },
+  { id: 'm', title: 'M', lane: 'moving' },
+  { id: 'w1', title: 'W1', lane: 'waiting' },
+  { id: 'w2', title: 'W2', lane: 'waiting' },
+])
+
+function mountBand($: Engine, bodyColumns: number) {
+  return $.ui.mount({
+    plugin: 'watchmen',
+    surface: 'terminal',
+    component: 'AbovePrompt',
+    props: { hasSurvey: false, isWorking: false, maxRows: 3, bodyColumns, scroll: { offset: 0, bodyRows: 3 }, view: {} },
+  })
+}
+
+test('the band fits its columns: words and buttons when wide, a short count when narrow', async ($, on) => {
+  mock.env(on, { WATCHMEN: '1' })
+  const seen = engine(on, { '.companion/board.json': BAND_BOARD }, 10)
+  await $.session.start(START)
+  await seen.clock.settle()
+
+  const wide = JSON.stringify(await (await mountBand($, 100)).drawn())
+  for (const text of ['⚛', '1 need you', '· 1 moving', '· 2 waiting', '"label":"brief"', '"label":"hide"', '#E5484D', 'cyan']) expect(wide).toContain(text)
+
+  const narrow = JSON.stringify(await (await mountBand($, 30)).drawn())
+  expect(narrow).toContain('1 need')
+  expect(narrow).not.toContain('moving')
+  expect(narrow).not.toContain('"label":"brief"')
+  expect(BAND_TEXT_FITS(narrow, 30)).toBe(true)
+})
+
+function BAND_TEXT_FITS(drawn: string, columns: number): boolean {
+  const texts = [...drawn.matchAll(/"children":\["([^"]*)"\]/g)].map(match => match[1] ?? '')
+  return texts.join('').length <= columns
+}
+
+test('hide hides the band for the session, and it stays hidden', async ($, on) => {
+  mock.env(on, { WATCHMEN: '1' })
+  const seen = engine(on, { '.companion/board.json': BAND_BOARD }, 10)
+  await $.session.start(START)
+  await seen.clock.settle()
+  const band = await mountBand($, 100)
+  await band.press({ key: 'hide' })
+  const again = JSON.stringify(await (await mountBand($, 100)).drawn())
+  expect(again).not.toContain('need you')
+})
+
+test('inside herdr the sidebar tokens go out styled by state: set the live one, clear the others', async ($, on) => {
+  mock.env(on, { WATCHMEN: '1', HERDR_WORKSPACE_ID: 'w1', HERDR_BIN_PATH: '/opt/herdr' })
+  const seen = engine(on, { '.companion/board.json': BAND_BOARD }, 10)
+  await $.session.start(START)
+  await seen.clock.settle()
+  expect(seen.runs[0]).toEqual([
+    '/opt/herdr', 'workspace', 'report-metadata', '--source', 'watchmen',
+    '--token', 'watchmen=⚛ 1 need you',
+    '--token', 'watchmen_alert=⚛ 1 need you', '--clear-token', 'watchmen_changed', '--clear-token', 'watchmen_quiet',
+    '--ttl-ms', '45000', 'w1',
+  ])
 })
