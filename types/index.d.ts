@@ -7,6 +7,8 @@ export type Watch = {
   boardError?: string
   /** Where to publish the sidebar token when the watch runs inside herdr. */
   herdr?: { bin: string; workspace: string }
+  /** Changed items waiting to wake the watch, and when it last woke. */
+  wake?: { pending: string[]; lastWakeAt?: number }
 }
 
 /** Where an item stands for the human: what needs them, what moves on its own, what waits on others. */
