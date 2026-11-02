@@ -17,6 +17,10 @@ import {
   move,
   parseBoard,
   serialize,
+  bandLayout,
+  mascotState,
+  paintAtom,
+  sidebarTokens,
   enteredNeedsYou,
   queueWake,
   sanitize,
@@ -262,11 +266,28 @@ async function herdrOf($: EngineInterface): Promise<{ herdr?: { bin: string; wor
  * Every tick refreshes it with a time to live, so it disappears soon after the watch stops.
  */
 async function publishSidebar($: EngineInterface, herdr: { bin: string; workspace: string }, items: readonly Item[]) {
+  // `$watchmen` plain, and the three state tokens herdr's config styles one colour each: only the
+  // current state's carries text, the others are cleared.
+  const tokens = Object.entries(sidebarTokens(items)).flatMap(([name, text]) =>
+    text ? ['--token', `${name}=${text}`] : ['--clear-token', name],
+  )
   const argv = [
     herdr.bin, 'workspace', 'report-metadata', '--source', 'watchmen',
-    '--token', `watchmen=${sidebarToken(items)}`, '--ttl-ms', String(SIDEBAR_TTL_MS), herdr.workspace,
+    '--token', `watchmen=${sidebarToken(items)}`, ...tokens, '--ttl-ms', String(SIDEBAR_TTL_MS), herdr.workspace,
   ]
   await $.process.run(argv).catch(() => undefined)
+}
+
+// The atom template, read once from the plugin's assets and painted per state.
+let atomTemplate: string | undefined
+
+async function atomSvg($: EngineInterface, state: ReturnType<typeof mascotState>): Promise<string | undefined> {
+  try {
+    atomTemplate ??= await $.fs.read(`${$.plugin.root}/assets/atom.svg`)
+    return paintAtom(atomTemplate, state)
+  } catch {
+    return undefined
+  }
 }
 
 /**
@@ -514,12 +535,46 @@ export const register: Register = on => {
 
   // The board opens by itself only where it docks beside the transcript (the fullscreen layout);
   // on the main screen it would push the conversation around, so there it waits for /watchmen.
+  // The band: one slim row above the prompt in the watch session, the mascot and the lane counts,
+  // with brief and hide. It also opens the board pane by itself where it docks beside the transcript
+  // (the fullscreen layout); on the main screen the pane waits for /watchmen.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    if (!isPaneOffered && e.viewport?.isFullscreen === true && (await isWatch($))) {
+    const watch = (await $.state.get(WATCH)).value
+    if (!watch) return next(e)
+    if (!isPaneOffered && e.viewport?.isFullscreen === true) {
       isPaneOffered = true
       void $.ui.open({ id: PANE, title: PANE_TITLE })
     }
-    return next(e)
+    if (watch.isBandHidden || e.props.hasSurvey) return next(e)
+    const items = await read($, board)
+    const { parts, hasButtons } = bandLayout(items, e.props.bodyColumns)
+    const elements = $.ui.resolve(e)
+    const { Box, Text, Button } = elements
+    const state = mascotState(items)
+    // Remote surfaces draw the SVG atom; a terminal has no Svg, so there the mascot is the glyph.
+    const Svg = 'Svg' in elements ? elements.Svg : undefined
+    const atom = Svg ? await atomSvg($, state) : undefined
+    return (
+      <Box flexDirection="row">
+        {parts.map((part, at) =>
+          at === 0 && Svg && atom ? (
+            <Svg key="mascot" source={atom} alt="⚛" width={16} height={16} />
+          ) : (
+            <Text key={`part-${at}`} color={part.color} bold={part.bold} dimColor={part.dim}>
+              {at === 0 ? part.text : ` ${at === 1 ? '' : '· '}${part.text}`}
+            </Text>
+          ),
+        )}
+        {hasButtons && (
+          <Box key="actions" flexDirection="row">
+            <Text>  </Text>
+            <Button key="brief" label="brief" onPress={() => $.command.run({ command: 'watchmen', args: 'brief' })} />
+            <Text> </Text>
+            <Button key="hide" label="hide" onPress={() => patchWatch($, held => ({ ...held, isBandHidden: true }))} />
+          </Box>
+        )}
+      </Box>
+    )
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {

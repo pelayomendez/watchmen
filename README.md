@@ -67,6 +67,9 @@ The model's tools are `board_track`, `board_move`, `board_drop` and `board_chang
 
 ## What you see
 
+- **The band**: one slim row above the prompt in the watch session: the mascot, the lane counts (needs you in red, moving in cyan, waiting dim), and two buttons, `brief` and `hide` (hidden for the rest of the session). It shortens its words, then drops the buttons and the other counts, as the terminal narrows.
+- **The mascot**: a hydrogen atom, one nucleus, one orbit, one electron (`assets/atom.svg`, drawn for this project), coloured by state: blue when calm, the electron amber when something changed, red when something needs you. Surfaces that draw SVG (the desktop app, the editor) show the picture; a terminal has no SVG element, so there it is the `⚛` glyph in the state's colour.
+
 - **The pane**, `⚛ watchmen`: the lanes with their items, changed ones marked ◆ and bold. It opens by itself beside the transcript in the fullscreen layout; on the main screen, `/watchmen` opens it.
 - **The status line**: `⚛ watchmen · 2 need you · 1 moving · 1 changed · 42% · 3h07`. At 75% context it asks for a handoff before the window fills.
 - **Toasts**: one when an item changes, one when the watch runs long.
@@ -125,6 +128,13 @@ node scripts/herdr-follower.mjs        # foreground; Ctrl-C to stop
 ```toml
 [ui.sidebar.spaces]
 rows = [["state_icon", "workspace"], ["branch", "git_status"], ["$watchmen"]]
+```
+
+For colour, use the three state tokens instead: only the one for the current state carries text (red and bold when something needs you, amber when something changed, dim when quiet). `herdr config check` accepts this row:
+
+```toml
+[ui.sidebar.spaces]
+rows = [["state_icon", "workspace"], ["branch", "git_status"], [{ token = "$watchmen_alert", fg = "#E5484D", bold = true }, { token = "$watchmen_changed", fg = "#F5A524" }, { token = "$watchmen_quiet", dim = true }]]
 ```
 
 A secondary action, `watchmen.toggle-board`, opens the read-only board list in a split instead; bind it too if you want the list without the conversation. Without the plugin, run `watchmen board` in a pane of its own.

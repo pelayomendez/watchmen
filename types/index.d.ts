@@ -9,6 +9,8 @@ export type Watch = {
   herdr?: { bin: string; workspace: string }
   /** Changed items waiting to wake the watch, and when it last woke. */
   wake?: { pending: string[]; lastWakeAt?: number }
+  /** The band above the prompt was hidden for this session. */
+  isBandHidden?: boolean
 }
 
 /** Where an item stands for the human: what needs them, what moves on its own, what waits on others. */
