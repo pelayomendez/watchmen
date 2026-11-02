@@ -105,7 +105,7 @@ case "$verb" in
     pane="$a"
     safe_id "$pane" || fail "unsafe id in decision"
     set_follow off
-    "$herdr_bin" pane move "$pane" --new-tab --tab-label "$label" --label "$label" --no-focus \
+    "$herdr_bin" pane move "$pane" --new-tab --label "$label" --no-focus \
       | node "$script_dir/herdr-rekey.mjs" "$pane"
     ;;
   ERROR)
