@@ -80,7 +80,8 @@ case "$verb" in
     pane="$a"; tab="$b"; target="$c"
     safe_id "$pane" && safe_id "$tab" && safe_id "$target" || fail "unsafe id in decision"
     set_follow on
-    exec "$herdr_bin" pane move "$pane" --tab "$tab" --target-pane "$target" --split right --ratio "$ratio" --label "$label" --focus
+    # --label is only valid with --new-tab or --new-workspace; the pane keeps its label when it moves.
+    exec "$herdr_bin" pane move "$pane" --tab "$tab" --target-pane "$target" --split right --ratio "$ratio" --focus
     ;;
   SEND)
     pane="$a"

@@ -74,6 +74,11 @@ esac
 }
 
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms))
+// Polls until check() holds or the time runs out, so a loaded machine does not fail the test.
+async function until(check, ms = 5_000) {
+  const end = Date.now() + ms
+  while (Date.now() < end && !check()) await wait(20)
+}
 const exited = child => new Promise(resolve => (child.exitCode !== null ? resolve(child.exitCode) : child.on('exit', resolve)))
 
 test('the follower subscribes, follows a tab switch, and stops when the watch pane is gone', async () => {
@@ -84,23 +89,28 @@ test('the follower subscribes, follows a tab switch, and stops when the watch pa
   ])
   const child = w.start()
   const server = await w.connected
-  assert.equal(w.requests[0].method, 'events.subscribe')
-  assert.deepEqual(w.requests[0].params.subscriptions.map(one => one.type), ['tab.focused', 'pane.closed', 'pane.exited'])
-  assert.equal(readFileSync(join(w.state, 'follower.pid'), 'utf8').trim(), String(child.pid))
+  try {
+    assert.equal(w.requests[0].method, 'events.subscribe')
+    assert.deepEqual(w.requests[0].params.subscriptions.map(one => one.type), ['tab.focused', 'pane.closed', 'pane.exited'])
+    assert.equal(readFileSync(join(w.state, 'follower.pid'), 'utf8').trim(), String(child.pid))
 
-  // Two quick switches: only the last is followed.
-  w.send({ event: 'tab_focused', data: { type: 'tab_focused', tab_id: 'w1:t1', workspace_id: 'w1' } })
-  w.send({ event: 'tab_focused', data: { type: 'tab_focused', tab_id: 'w1:t2', workspace_id: 'w1' } })
-  await wait(600)
-  assert.deepEqual(w.calls(), ['herdr pane move w1:p7 --tab w1:t2 --target-pane w1:p2 --split right --ratio 0.35 --label watchmen --no-focus'])
+    // Two quick switches: only the last is followed.
+    w.send({ event: 'tab_focused', data: { type: 'tab_focused', tab_id: 'w1:t1', workspace_id: 'w1' } })
+    w.send({ event: 'tab_focused', data: { type: 'tab_focused', tab_id: 'w1:t2', workspace_id: 'w1' } })
+    await until(() => w.calls().length > 0)
+    await wait(300)
+    assert.deepEqual(w.calls(), ['herdr pane move w1:p7 --tab w1:t2 --target-pane w1:p2 --split right --ratio 0.35 --no-focus'])
 
-  w.setPanes([{ pane_id: 'w1:p2', tab_id: 'w1:t2', workspace_id: 'w1', focused: true }])
-  w.send({ event: 'pane_exited', data: { type: 'pane_exited', pane_id: 'w1:p7', workspace_id: 'w1' } })
-  assert.equal(await exited(child), 0)
-  assert.equal(readFileSync(join(w.state, 'follow'), 'utf8').trim(), 'off')
-  assert.equal(existsSync(join(w.state, 'follower.pid')), false)
-  server.close()
-  w.cleanup()
+    w.setPanes([{ pane_id: 'w1:p2', tab_id: 'w1:t2', workspace_id: 'w1', focused: true }])
+    w.send({ event: 'pane_exited', data: { type: 'pane_exited', pane_id: 'w1:p7', workspace_id: 'w1' } })
+    assert.equal(await exited(child), 0)
+    assert.equal(readFileSync(join(w.state, 'follow'), 'utf8').trim(), 'off')
+    assert.equal(existsSync(join(w.state, 'follower.pid')), false)
+  } finally {
+    if (child.exitCode === null) child.kill('SIGTERM')
+    server.close()
+    w.cleanup()
+  }
 })
 
 test('a second follower does not start while one runs, and none starts while follow is off', async () => {
