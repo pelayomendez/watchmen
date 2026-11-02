@@ -101,7 +101,7 @@ const BESIDE = panes(pane('w1:p7', 'w1:t1', WATCH), pane('w1:p2', 'w1:t2', { foc
 test('the hook moves the watch without taking focus', async () => {
   const box = sandbox({ follow: 'on', panesJson: BESIDE })
   await box.run(event('w1:t2'))
-  assert.deepEqual(box.calls(), ['herdr pane move w1:p7 --tab w1:t2 --target-pane w1:p2 --split right --ratio 0.35 --label watchmen --no-focus'])
+  assert.deepEqual(box.calls(), ['herdr pane move w1:p7 --tab w1:t2 --target-pane w1:p2 --split right --ratio 0.35 --no-focus'])
 })
 
 test('the hook gives way when a newer event arrives within the debounce', async () => {
@@ -129,4 +129,44 @@ test('the hook turns follow off once the watch pane is gone', async () => {
   await box.run(event('w1:t2'))
   assert.equal(box.followState(), 'off')
   assert.deepEqual(box.calls(), [])
+})
+
+test('a split move never passes --label: herdr accepts it only with --new-tab or --new-workspace', async () => {
+  const box = sandbox({ follow: 'on', panesJson: BESIDE })
+  await box.run(event('w1:t2'))
+  const [move] = box.calls()
+  assert.match(move, /--split right/)
+  assert.doesNotMatch(move, /--label/)
+})
+
+test('the hook and the follower both firing for one switch move the pane once', async () => {
+  const { followOnce } = await import('../scripts/herdr-follow-move.mjs')
+  const dir = mkdtempSync(join(tmpdir(), 'both '))
+  const panesFile = join(dir, 'panes.json')
+  const log = join(dir, 'log')
+  const bin = join(dir, 'herdr')
+  // A fake herdr whose move really moves: the watch pane's tab becomes the target's.
+  writeFileSync(
+    bin,
+    `#!/usr/bin/env bash
+case "$1 $2" in
+  "pane list") cat "$FAKE_PANES" ;;
+  "tab list") cat "$FAKE_TABS" ;;
+  "pane move")
+    printf '%s\\n' "herdr $*" >> "$FAKE_LOG"
+    node -e 'const fs=require("fs");const f=process.argv[1];const d=JSON.parse(fs.readFileSync(f));for(const p of d.result.panes){if(p.pane_id===process.argv[2])p.tab_id=process.argv[3]}fs.writeFileSync(f,JSON.stringify(d))' "$FAKE_PANES" "$3" "$5" ;;
+esac
+`,
+  )
+  chmodSync(bin, 0o755)
+  writeFileSync(panesFile, BESIDE)
+  writeFileSync(join(dir, 'tabs.json'), TABS)
+  writeFileSync(log, '')
+  mkdirSync(join(dir, 'state', 'watchmen'), { recursive: true })
+  writeFileSync(join(dir, 'state', 'watchmen', 'follow'), 'on\n')
+  const env = { ...process.env, HERDR_BIN_PATH: bin, FAKE_PANES: panesFile, FAKE_TABS: join(dir, 'tabs.json'), FAKE_LOG: log, XDG_STATE_HOME: join(dir, 'state') }
+
+  assert.equal(followOnce(event('w1:t2'), env), 'MOVE w1:p7 w1:t2 w1:p2')
+  assert.equal(followOnce(event('w1:t2'), env), 'SKIP already in this tab')
+  assert.equal(readFileSync(log, 'utf8').trim().split('\n').length, 1)
 })

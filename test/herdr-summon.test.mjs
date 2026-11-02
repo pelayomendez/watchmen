@@ -95,7 +95,7 @@ test('the summon script spawns, brings and sends through the herdr CLI', () => {
   }
 
   const brought = summon(list(pane('w1:p1', 'w1:t1', { focused: true }), pane('w1:p7', 'w1:t3', WATCH)))
-  assert.deepEqual(brought.calls, ['herdr pane move w1:p7 --tab w1:t1 --target-pane w1:p1 --split right --ratio 0.35 --label watchmen --focus'])
+  assert.deepEqual(brought.calls, ['herdr pane move w1:p7 --tab w1:t1 --target-pane w1:p1 --split right --ratio 0.35 --focus'])
   assert.equal(brought.follow, 'on')
 
   const sent = summon(list(pane('w1:p1', 'w1:t1', { focused: true }), pane('w1:p7', 'w1:t1', WATCH)))
