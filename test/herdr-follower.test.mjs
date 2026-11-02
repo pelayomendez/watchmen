@@ -146,3 +146,24 @@ test('a pidfile naming a pid that is not a follower is stale: the new follower c
     w.cleanup()
   }
 })
+
+test('followers racing over a stale pidfile: only one takes it over', async () => {
+  const w = world()
+  w.setPanes([{ pane_id: 'w1:p7', tab_id: 'w1:t1', workspace_id: 'w1', label: 'watchmen', focused: true }])
+  writeFileSync(join(w.state, 'follower.pid'), `${process.pid}\n`)
+  const children = [w.start(), w.start(), w.start(), w.start()]
+  const server = await w.connected
+  try {
+    await until(() => children.filter(child => child.exitCode !== null).length >= 3)
+    await wait(300)
+    assert.equal(w.requests.length, 1)
+    const running = children.filter(child => child.exitCode === null)
+    assert.equal(running.length, 1)
+    assert.equal(readFileSync(join(w.state, 'follower.pid'), 'utf8').trim(), String(running[0].pid))
+  } finally {
+    for (const child of children) if (child.exitCode === null) child.kill('SIGTERM')
+    await Promise.all(children.map(exited))
+    server.close()
+    w.cleanup()
+  }
+})

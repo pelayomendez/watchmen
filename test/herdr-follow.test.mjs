@@ -12,9 +12,10 @@ const TABS = tabs({ tab_id: 'w1:t1', label: 'api', workspace_id: 'w1' }, { tab_i
 
 const decide = over => decideFollow({ isFollowing: true, eventJson: event('w1:t2'), tabsJson: TABS, ...over })
 
-test('stops when the watch has ended, whatever the panes say', () => {
+test('stops when the watch in the labelled pane has ended, judged by that pane alone', () => {
   const json = panes(pane('w1:p7', 'w1:t1', WATCH), pane('w1:p2', 'w1:t2', { focused: true }))
-  assert.equal(decide({ panesJson: json, isWatchAlive: false }), 'STOP the watch has ended')
+  assert.equal(decide({ panesJson: json, isPaneAlive: id => id !== 'w1:p7' }), 'STOP the watch has ended')
+  assert.equal(decide({ panesJson: json, isPaneAlive: id => id === 'w1:p7' }), 'MOVE w1:p7 w1:t2 w1:p2')
 })
 
 test('follows into the newly focused tab, beside the pane that has focus there', () => {
@@ -67,7 +68,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-function sandbox({ follow, panesJson, lockOwner, pointer }) {
+function sandbox({ follow, panesJson, lockOwner, pointer, records = {}, moveAnswer = '' }) {
   const dir = mkdtempSync(join(tmpdir(), 'follow '))
   const bin = join(dir, 'herdr')
   writeFileSync(
@@ -76,6 +77,7 @@ function sandbox({ follow, panesJson, lockOwner, pointer }) {
 case "$1 $2" in
   "pane list") cat "$FAKE_PANES" ;;
   "tab list") cat "$FAKE_TABS" ;;
+  "pane move") printf '%s\\n' "herdr $*" >> "$FAKE_LOG"; cat "$FAKE_MOVE" ;;
   *) printf '%s\\n' "herdr $*" >> "$FAKE_LOG" ;;
 esac
 `,
@@ -92,7 +94,10 @@ esac
     writeFileSync(join(state, 'follow.lock', 'owner'), lockOwner)
   }
   if (pointer) writeFileSync(join(state, 'current'), pointer)
-  const env = { ...process.env, HERDR_BIN_PATH: bin, FAKE_PANES: join(dir, 'panes.json'), FAKE_TABS: join(dir, 'tabs.json'), FAKE_LOG: join(dir, 'log'), XDG_STATE_HOME: join(dir, 'state') }
+  mkdirSync(join(state, 'panes'), { recursive: true })
+  for (const [id, pid] of Object.entries(records)) writeFileSync(join(state, 'panes', id), JSON.stringify({ pane_id: id, pid, cwd: '/ws' }))
+  writeFileSync(join(dir, 'move.json'), moveAnswer)
+  const env = { ...process.env, HERDR_BIN_PATH: bin, FAKE_PANES: join(dir, 'panes.json'), FAKE_TABS: join(dir, 'tabs.json'), FAKE_LOG: join(dir, 'log'), FAKE_MOVE: join(dir, 'move.json'), XDG_STATE_HOME: join(dir, 'state') }
   const run = eventJson =>
     new Promise(resolve => {
       const child = spawn(process.execPath, [fileURLToPath(new URL('../scripts/herdr-follow.mjs', import.meta.url))], {
@@ -149,11 +154,25 @@ test('a lock whose owner died is taken over at once', async () => {
   assert.equal(existsSync(join(box.state, 'follow.lock')), false)
 })
 
-test('follow stops once the watch launcher has exited', async () => {
-  const box = sandbox({ follow: 'on', panesJson: BESIDE, pointer: '/ws\n999999\n' })
+test('follow stops once the watch in its pane has ended; another watch elsewhere does not count', async () => {
+  // The global pointer names a dead launcher (a second watch that quit): it no longer decides.
+  const alive = sandbox({ follow: 'on', panesJson: BESIDE, pointer: '/elsewhere\n999999\n', records: { 'w1:p7': process.pid } })
+  await alive.run(event('w1:t2'))
+  assert.equal(alive.calls().length, 1)
+  assert.equal(alive.followState(), 'on')
+
+  const dead = sandbox({ follow: 'on', panesJson: BESIDE, records: { 'w1:p7': 999999 } })
+  await dead.run(event('w1:t2'))
+  assert.deepEqual(dead.calls(), [])
+  assert.equal(dead.followState(), 'off')
+})
+
+test('a move that gives the pane a new id moves its record with it', async () => {
+  const moveAnswer = JSON.stringify({ result: { type: 'pane_moved', previous_pane_id: 'w1:p7', pane: { pane_id: 'w1:p8', tab_id: 'w1:t2' } } })
+  const box = sandbox({ follow: 'on', panesJson: BESIDE, records: { 'w1:p7': process.pid }, moveAnswer })
   await box.run(event('w1:t2'))
-  assert.deepEqual(box.calls(), [])
-  assert.equal(box.followState(), 'off')
+  assert.equal(existsSync(join(box.state, 'panes', 'w1:p7')), false)
+  assert.equal(JSON.parse(readFileSync(join(box.state, 'panes', 'w1:p8'), 'utf8')).pid, process.pid)
 })
 
 test('the split ratio is the person\'s share, 0.7 unless WATCHMEN_RATIO gives a sane one', async () => {
