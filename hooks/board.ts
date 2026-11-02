@@ -312,7 +312,10 @@ export function wakePrompt(
   if (state.lastWakeAt !== undefined && now - state.lastWakeAt < WAKE_EVERY_MS) return { wait: 'woke recently' }
   if (isTurnRunning) return { wait: 'a turn is running' }
   if (draft.trim() !== '') return { wait: 'the person is typing' }
-  return { text: `◆ ${state.pending.map(sanitize).join(', ')} changed — triage` }
+  // A constant prompt: titles come from check output and board.json, so they reach the model only
+  // as tool data through board_changes, never as words in a user turn.
+  const count = state.pending.length
+  return { text: `◆ ${count} ${count === 1 ? 'item' : 'items'} changed — call board_changes` }
 }
 
 /** Whether a board change moved an item into needs-you: the one kind of change that pings. */

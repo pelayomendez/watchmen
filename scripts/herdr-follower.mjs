@@ -9,7 +9,7 @@
 // per line; the request is { id, method: "events.subscribe", params: { subscriptions } }.
 
 import { execFileSync, spawn } from 'node:child_process'
-import { readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs'
+import { closeSync, mkdirSync, openSync, readFileSync, rmSync, writeSync } from 'node:fs'
 import net from 'node:net'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
@@ -17,7 +17,7 @@ import { fileURLToPath } from 'node:url'
 
 import { isPaneEnd, isTabFocus } from './herdr-follow-decision.mjs'
 import { WATCHMEN_LABEL } from './herdr-summon-decision.mjs'
-import { followOnce, isFollowing, paths, setFollow } from './herdr-follow-move.mjs'
+import { followOnce, isFollowing, isWatchAlive, paths, setFollow } from './herdr-follow-move.mjs'
 
 const DEBOUNCE_MS = 150
 const CHECK_MS = 5_000
@@ -28,16 +28,48 @@ function say(text) {
   process.stderr.write(`watchmen follower: ${text}\n`)
 }
 
-/** The follower recorded in the pidfile, if that process still runs. */
+/** Whether a pid runs this follower script: a recycled pid running something else does not count. */
+function isFollowerPid(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false
+  try {
+    const command = execFileSync('ps', ['-o', 'command=', '-p', String(pid)], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+    return command.includes('herdr-follower.mjs')
+  } catch {
+    return false
+  }
+}
+
+/** The follower recorded in the pidfile, if that process is still a follower. */
 function runningFollower() {
   try {
     const pid = Number(readFileSync(pidFile, 'utf8').trim())
-    if (!Number.isInteger(pid) || pid <= 0) return undefined
-    process.kill(pid, 0)
-    return pid
+    return isFollowerPid(pid) ? pid : undefined
   } catch {
     return undefined
   }
+}
+
+/**
+ * Claims the pidfile, created exclusively so two followers starting together cannot both win. A
+ * pidfile naming a pid that is not a follower is stale: it is removed and the claim tried once more.
+ */
+function claimPidfile() {
+  mkdirSync(dir, { recursive: true })
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const fd = openSync(pidFile, 'wx')
+      writeSync(fd, `${process.pid}\n`)
+      closeSync(fd)
+      return true
+    } catch (error) {
+      if (error.code !== 'EEXIST') throw error
+      if (runningFollower() !== undefined) return false
+      try {
+        rmSync(pidFile)
+      } catch {}
+    }
+  }
+  return false
 }
 
 if (process.argv.includes('--spawn')) {
@@ -48,13 +80,11 @@ if (process.argv.includes('--spawn')) {
   process.exit(0)
 }
 
-if (runningFollower() !== undefined) {
+if (!isFollowing()) process.exit(0)
+if (!claimPidfile()) {
   say('another follower is running')
   process.exit(0)
 }
-if (!isFollowing()) process.exit(0)
-mkdirSync(dir, { recursive: true })
-writeFileSync(pidFile, `${process.pid}\n`)
 
 function stop(reason) {
   try {
@@ -79,6 +109,10 @@ function isWatchRunning() {
 // Follow off, or the watch gone: nothing left to do.
 setInterval(() => {
   if (!isFollowing()) stop('follow is off')
+  if (!isWatchAlive()) {
+    setFollow(false)
+    stop('the watch has ended')
+  }
 }, CHECK_MS)
 
 let pending
