@@ -2,7 +2,7 @@ import type { On } from 'claude-code'
 import { expect, mock, test } from 'claude-code/testing'
 
 import type { Item } from '../types'
-import { applyCheck, applyToBoard, approvalLines, attempt, dueChecks, sidebarToken, move, parse, parseBoard, serialize, statusLine, summary, track } from './board'
+import { applyCheck, applyToBoard, approvalLines, attempt, dueChecks, enteredNeedsYou, queueWake, sidebarToken, wakePrompt, move, parse, parseBoard, serialize, statusLine, summary, track } from './board'
 import { newestBackupOf, newestHandoff } from './register'
 
 const MIN = 60_000
@@ -169,12 +169,19 @@ function engine(on: On, files: Record<string, string>, percent: number) {
   const tools: string[] = []
   on('tool.register', ($, e) => (tools.push(e.name), { value: { tool: `mcp__watchmen__${e.name}` } }))
   const cleared: string[] = []
-  on('env.set', ($, e) => (cleared.push(e.name), { value: undefined }))
+  on('env.set', ($, e) => (cleared.push(e.name), { value: undefined }) as never)
   const status: (string | undefined)[] = []
   const toasts: string[] = []
   on('ui.status', ($, e) => (status.push(e.text), { value: undefined }))
   on('ui.toast', ($, e) => (toasts.push(e.text), { value: undefined }))
   on('ui.open', () => ({ value: { isPlaced: true as const } }))
+  let draft = ''
+  on('prompt.read', () => ({ value: { text: draft, cursor: draft.length } }))
+  const prompts: string[] = []
+  on('prompt.submit', ($, e) => (prompts.push(e.text), { text: e.text }) as never)
+  on('ui.log', () => ({ value: undefined }) as never)
+  const notices: string[] = []
+  on('ui.notify', ($, e) => (notices.push(e.text), { value: { isSent: true, channel: 'terminal_bell' } }) as never)
   const runs: string[][] = []
   let output = 'In Progress'
   let gate: Promise<void> | undefined
@@ -199,6 +206,9 @@ function engine(on: On, files: Record<string, string>, percent: number) {
     writes,
     runs,
     setOutput: (text: string) => (output = text),
+    setDraft: (text: string) => (draft = text),
+    prompts,
+    notices,
     holdNextSave: () => {
       let release = () => {}
       writeGate = new Promise(resolve => (release = resolve))
@@ -476,4 +486,68 @@ test('an unsafe herdr workspace id publishes nothing', async ($, on) => {
   await $.session.start(START)
   await seen.clock.advance(MIN)
   expect(seen.runs).toEqual([])
+})
+
+test('wakes batch: one wake per three minutes, held while a turn runs or the person types', () => {
+  const now = 1_000_000
+  const idle = { now, isTurnRunning: false, draft: '' }
+  expect(wakePrompt({ pending: [] }, idle)).toEqual({ wait: 'nothing changed' })
+  const queued = queueWake(queueWake({ pending: [] }, ['Frames', 'Deck']), ['Frames'])
+  expect(queued.pending).toEqual(['Frames', 'Deck'])
+  expect(wakePrompt(queued, idle)).toEqual({ text: '◆ Frames, Deck changed — triage' })
+  expect(wakePrompt({ ...queued, lastWakeAt: now - 60_000 }, idle)).toEqual({ wait: 'woke recently' })
+  expect(wakePrompt({ ...queued, lastWakeAt: now - 180_000 }, idle)).toEqual({ text: '◆ Frames, Deck changed — triage' })
+  expect(wakePrompt(queued, { ...idle, isTurnRunning: true })).toEqual({ wait: 'a turn is running' })
+  expect(wakePrompt(queued, { ...idle, draft: 'half a thought' })).toEqual({ wait: 'the person is typing' })
+  expect(wakePrompt(queueWake({ pending: [] }, ['evil\x1b[2J']), idle)).toEqual({ text: '◆ evil[2J changed — triage' })
+})
+
+test('only an item newly in needs-you pings', () => {
+  const before: Item[] = [{ id: 'a', title: 'A', lane: 'moving' }, { id: 'b', title: 'B', lane: 'needs-you' }]
+  const after: Item[] = [{ id: 'a', title: 'A', lane: 'needs-you' }, { id: 'b', title: 'B', lane: 'needs-you' }, { id: 'c', title: 'C', lane: 'waiting' }]
+  expect(enteredNeedsYou(before, after).map(one => one.id)).toEqual(['a'])
+  expect(enteredNeedsYou(after, after)).toEqual([])
+})
+
+test('a changed check wakes the watch to triage, batched, and not while the person is typing', async ($, on) => {
+  mock.env(on, { WATCHMEN: '1' })
+  const seen = engine(on, { '.companion/board.json': serialize([{ ...JIRA, check: { argv: ['acli', 'jira'], everyMs: MIN } }]) }, 10)
+  await $.session.start(START)
+  await seen.clock.settle()
+  await $.command.run(typed(`approve NRV-1 ${savedBoard(seen)[0]?.approvalHash}`))
+  await seen.clock.advance(15_000)
+  expect(seen.prompts).toEqual([])
+
+  seen.setOutput('In Review')
+  await seen.clock.advance(MIN)
+  await seen.clock.advance(15_000)
+  expect(seen.prompts).toEqual(['◆ Frames changed — triage'])
+
+  // Another change a minute later waits for the three minutes to pass, and for the person to stop typing.
+  seen.setOutput('Done')
+  seen.setDraft('let me')
+  await seen.clock.advance(4 * MIN)
+  expect(seen.prompts).toHaveLength(1)
+  seen.setDraft('')
+  await seen.clock.advance(15_000)
+  expect(seen.prompts).toEqual(['◆ Frames changed — triage', '◆ Frames changed — triage'])
+})
+
+test('moving an item into needs-you notifies, natively and in herdr; quiet moves do not', async ($, on) => {
+  mock.env(on, { WATCHMEN: '1', HERDR_WORKSPACE_ID: 'w1', HERDR_BIN_PATH: '/opt/herdr' })
+  const seen = engine(on, {}, 10)
+  await $.session.start(START)
+  await seen.clock.settle()
+  await $.tool.call({ tool: 'mcp__watchmen__board_track', id: 'mr', title: '!42 frames', lane: 'waiting' })
+  await $.tool.call({ tool: 'mcp__watchmen__board_move', id: 'mr', lane: 'moving', note: 'pipeline running' })
+  await seen.clock.settle()
+  expect(seen.notices).toEqual([])
+  await $.tool.call({ tool: 'mcp__watchmen__board_move', id: 'mr', lane: 'needs-you', note: 'two review comments' })
+  await seen.clock.settle()
+  expect(seen.notices).toEqual(['!42 frames: two review comments'])
+  expect(seen.runs).toContainEqual(['/opt/herdr', 'notification', 'show', '⚛ watchmen', '--body', '!42 frames: two review comments', '--sound', 'request'])
+  // Already in needs-you: a new note does not ping again.
+  await $.tool.call({ tool: 'mcp__watchmen__board_move', id: 'mr', note: 'one comment left' })
+  await seen.clock.settle()
+  expect(seen.notices).toHaveLength(1)
 })

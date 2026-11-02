@@ -81,7 +81,7 @@ export function followOnce(eventJson, env = process.env) {
       const [pane, tab, target] = rest
       execFileSync(
         herdr(env),
-        ['pane', 'move', pane, '--tab', tab, '--target-pane', target, '--split', 'right', '--ratio', RATIO, '--label', 'watchmen', '--no-focus'],
+        ['pane', 'move', pane, '--tab', tab, '--target-pane', target, '--split', 'right', '--ratio', RATIO, '--no-focus'],
         { stdio: 'ignore', timeout: 5_000, env },
       )
     } else if (verb === 'STOP') {

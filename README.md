@@ -61,6 +61,8 @@ Tell the watch what to track in plain words ("keep an eye on NRV-123 and MR 42")
 | A branch moving | `["git", "ls-remote", "origin", "refs/heads/main"]` |
 | A todo | no check: it stays where you put it |
 
+**The watch comes to you.** When checks change, the plugin starts a turn in the watch session by itself (`$.prompt.submit`) with `◆ <titles> changed — triage`: at most one wake every three minutes, changes in between batched into the next, and never while a turn runs or while you have something typed in the prompt. The watch moves each item to its lane with a one-line note. An item that lands in needs-you raises a native notification and, inside herdr, a herdr notification, so you see it from any tab; quiet changes stay in the item's note.
+
 The model's tools are `board_track`, `board_move`, `board_drop` and `board_changes`. The board is kept in `.companion/board.json` (written through a temp file and a rename), so the next watch picks it up. If the file cannot be read, it is copied to a timestamped `board.json.<time>.bak` (earlier backups are never replaced) and never written over until you fix it and `/watchmen reload`, or start over with `/watchmen reset`.
 
 ## What you see

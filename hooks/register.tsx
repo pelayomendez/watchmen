@@ -17,6 +17,10 @@ import {
   move,
   parseBoard,
   serialize,
+  enteredNeedsYou,
+  queueWake,
+  sanitize,
+  wakePrompt,
   sidebarToken,
   isSafeHerdrArg,
   statusLine,
@@ -236,7 +240,12 @@ async function runCheck($: EngineInterface, item: Item, now: number) {
       return applied.items
     })
     await save($)
-    if (changedTitle) $.ui.toast(`⚛ ${changedTitle} changed`, { timeoutMs: 8_000 })
+    if (changedTitle) {
+      $.ui.toast(`⚛ ${changedTitle} changed`, { timeoutMs: 8_000 })
+      const title = changedTitle
+      const held = (await $.state.get(WATCH)).value
+      if (held) await $.state.set(WATCH, { ...held, wake: queueWake(held.wake ?? { pending: [] }, [title]) })
+    }
   } finally {
     running.delete(item.id)
   }
@@ -261,6 +270,36 @@ async function publishSidebar($: EngineInterface, herdr: { bin: string; workspac
   await $.process.run(argv).catch(() => undefined)
 }
 
+// Whether the main loop is in a turn: a wake waits for it to end. A reload starts it false, and
+// the engine queues a submitted prompt until the session is idle anyway.
+let isTurnRunning = false
+
+/** Wakes the watch to triage what changed, at most every three minutes and never over the person. */
+async function maybeWake($: EngineInterface, now: number) {
+  const watch = (await $.state.get(WATCH)).value
+  if (!watch?.wake || watch.wake.pending.length === 0) return
+  const draft = (await $.prompt.read()).text
+  const decision = wakePrompt(watch.wake, { now, isTurnRunning, draft })
+  if (!('text' in decision)) return
+  await $.state.set(WATCH, { ...watch, wake: { pending: [], lastWakeAt: now } })
+  void $.prompt.submit({ text: decision.text }).catch(error => $.ui.log(`watchmen: wake failed: ${String(error)}`))
+}
+
+/**
+ * Pings the person about items that just moved into needs-you: a native notification and, inside
+ * herdr, a herdr notification, so it reaches them from any tab. Quiet changes never ping.
+ */
+async function pingNeedsYou($: EngineInterface, items: readonly Item[]) {
+  if (items.length === 0) return
+  const watch = (await $.state.get(WATCH)).value
+  const text = items.map(one => sanitize(one.note ? `${one.title}: ${one.note}` : one.title)).join(' · ')
+  void $.ui.notify(text, { title: '⚛ watchmen' }).catch(() => undefined)
+  if (watch?.herdr) {
+    const argv = [watch.herdr.bin, 'notification', 'show', '⚛ watchmen', '--body', text, '--sound', 'request']
+    void $.process.run(argv).catch(() => undefined)
+  }
+}
+
 async function tick($: EngineInterface) {
   const watch = (await $.state.get(WATCH)).value
   if (!watch) return
@@ -270,6 +309,7 @@ async function tick($: EngineInterface) {
     void runCheck($, item, now).catch(error => $.ui.log(`watchmen: check ${item.id} failed: ${String(error)}`))
   }
   if (watch.herdr) void publishSidebar($, watch.herdr, items)
+  await maybeWake($, now)
   const { context } = await $.session.usage()
   const percent = context.percent ?? 0
   $.ui.status(statusLine(items, context.percent, now - watch.startedAt, HANDOFF_AT))
@@ -350,10 +390,23 @@ export const register: Register = on => {
     return result
   })
 
+  on('turn.start', ($, e, next) => {
+    if (e.agentId === undefined) isTurnRunning = true
+    return next(e)
+  })
+
+  on('turn.complete', ($, e, next) => {
+    if (e.agentId === undefined) isTurnRunning = false
+    return next(e)
+  })
+
   on('tool.call', { tool: 'mcp__watchmen__board_track' }, async ($, e) => {
     if (!(await isWatch($))) return { deny: NOT_WATCH }
     const patch = patchFrom(e as Record<string, unknown>)
-    return change($, items => track(items, patch), items => `Tracked. ${items.length} items on the board.`)
+    const before = await read($, board)
+    const answer = await change($, items => track(items, patch), items => `Tracked. ${items.length} items on the board.`)
+    if ('result' in answer) await pingNeedsYou($, enteredNeedsYou(before, await read($, board)))
+    return answer
   })
 
   on('tool.call', { tool: 'mcp__watchmen__board_move' }, async ($, e) => {
@@ -362,7 +415,10 @@ export const register: Register = on => {
     if (input.lane !== undefined && !isLane(input.lane)) return { deny: `Unknown lane: ${String(input.lane)}` }
     const lane = isLane(input.lane) ? input.lane : undefined
     const note = typeof input.note === 'string' ? input.note : undefined
-    return change($, items => move(items, String(input.id), lane, note), () => 'Moved.')
+    const before = await read($, board)
+    const answer = await change($, items => move(items, String(input.id), lane, note), () => 'Moved.')
+    if ('result' in answer) await pingNeedsYou($, enteredNeedsYou(before, await read($, board)))
+    return answer
   })
 
   on('tool.call', { tool: 'mcp__watchmen__board_drop' }, async ($, e) => {

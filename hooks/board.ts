@@ -289,3 +289,33 @@ export function isSafeHerdrArg(value: string | undefined, kind: 'id' | 'bin'): v
   if (!value || value.startsWith('-')) return false
   return kind === 'id' ? /^[A-Za-z0-9_:.-]{1,128}$/.test(value) : value === 'herdr' || /^\/[^\0\n]*$/.test(value)
 }
+
+/** At most one wake every three minutes: changes in between are batched into the next one. */
+export const WAKE_EVERY_MS = 180_000
+
+export type WakeState = { pending: string[]; lastWakeAt?: number }
+
+/** Queues changed titles for the next wake, each once. */
+export function queueWake(state: WakeState, titles: readonly string[]): WakeState {
+  return { ...state, pending: [...new Set([...state.pending, ...titles])] }
+}
+
+/**
+ * The prompt that wakes the watch to triage, or why not now: nothing queued, too soon after the
+ * last wake, a turn running, or the person in the middle of typing. A held wake stays queued.
+ */
+export function wakePrompt(
+  state: WakeState,
+  { now, isTurnRunning, draft }: { now: number; isTurnRunning: boolean; draft: string },
+): { text: string } | { wait: string } {
+  if (state.pending.length === 0) return { wait: 'nothing changed' }
+  if (state.lastWakeAt !== undefined && now - state.lastWakeAt < WAKE_EVERY_MS) return { wait: 'woke recently' }
+  if (isTurnRunning) return { wait: 'a turn is running' }
+  if (draft.trim() !== '') return { wait: 'the person is typing' }
+  return { text: `◆ ${state.pending.map(sanitize).join(', ')} changed — triage` }
+}
+
+/** Whether a board change moved an item into needs-you: the one kind of change that pings. */
+export function enteredNeedsYou(before: readonly Item[], after: readonly Item[]): Item[] {
+  return after.filter(one => one.lane === 'needs-you' && before.find(old => old.id === one.id)?.lane !== 'needs-you')
+}
