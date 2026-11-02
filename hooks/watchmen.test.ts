@@ -192,7 +192,8 @@ function engine(on: On, files: Record<string, string>, percent: number) {
     prompts.push(e.text)
     return { text: e.text } as never
   })
-  on('ui.log', () => ({ value: undefined }) as never)
+  const logs: string[] = []
+  on('ui.log', ($, e) => (logs.push(e.text), { value: undefined }) as never)
   const notices: string[] = []
   on('ui.notify', ($, e) => (notices.push(e.text), { value: { isSent: true, channel: 'terminal_bell' } }) as never)
   const runs: string[][] = []
@@ -228,6 +229,7 @@ function engine(on: On, files: Record<string, string>, percent: number) {
     },
     prompts,
     notices,
+    logs,
     holdNextSave: () => {
       let release = () => {}
       writeGate = new Promise(resolve => (release = resolve))
@@ -698,4 +700,17 @@ test('inside herdr the sidebar tokens go out styled by state: set the live one, 
     '--token', 'watchmen_alert=⚛ 1 need you', '--clear-token', 'watchmen_changed', '--clear-token', 'watchmen_quiet',
     '--ttl-ms', '45000', 'w1',
   ])
+})
+
+test('the band brief button prints the brief into the transcript', async ($, on) => {
+  mock.env(on, { WATCHMEN: '1' })
+  const seen = engine(on, { '.companion/board.json': BAND_BOARD }, 10)
+  await $.session.start(START)
+  await seen.clock.settle()
+  const band = await mountBand($, 100)
+  await band.press({ key: 'brief' })
+  await seen.clock.settle()
+  const brief = seen.logs.find(line => line.includes('{n}'))
+  expect(brief).toBeDefined()
+  for (const id of ['{m}', '{w1}', '{w2}']) expect(brief).toContain(id)
 })
