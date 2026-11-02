@@ -88,6 +88,13 @@ async function sha256(text: string): Promise<string> {
  * execution, and a board.json or a board_track call can come from anyone who can write to the repo
  * or the conversation, so no check runs until the human approves its exact argv here.
  */
+// The band's brief button prints the brief as a transcript row of its own. It cannot go through
+// /watchmen brief: $.command.run from a plugin skips that plugin's own command.run hook, so the
+// command would find no one to answer it.
+function showBrief($: EngineInterface, items: readonly Item[]): void {
+  $.ui.log(summary(items))
+}
+
 async function commandHash($: EngineInterface, argv: readonly string[]): Promise<string> {
   return sha256(JSON.stringify([await $.session.cwd(), argv]))
 }
@@ -568,7 +575,7 @@ export const register: Register = on => {
         {hasButtons && (
           <Box key="actions" flexDirection="row">
             <Text>  </Text>
-            <Button key="brief" label="brief" onPress={() => $.command.run({ command: 'watchmen', args: 'brief' })} />
+            <Button key="brief" label="brief" onPress={() => void showBrief($, items)} />
             <Text> </Text>
             <Button key="hide" label="hide" onPress={() => patchWatch($, held => ({ ...held, isBandHidden: true }))} />
           </Box>
