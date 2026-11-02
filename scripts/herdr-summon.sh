@@ -98,13 +98,15 @@ case "$verb" in
     safe_id "$pane" && safe_id "$tab" && safe_id "$target" || fail "unsafe id in decision"
     set_follow on
     # --label is only valid with --new-tab or --new-workspace; the pane keeps its label when it moves.
-    exec "$herdr_bin" pane move "$pane" --tab "$tab" --target-pane "$target" --split right --ratio "$ratio" --focus
+    "$herdr_bin" pane move "$pane" --tab "$tab" --target-pane "$target" --split right --ratio "$ratio" --focus \
+      | node "$script_dir/herdr-rekey.mjs" "$pane"
     ;;
   SEND)
     pane="$a"
     safe_id "$pane" || fail "unsafe id in decision"
     set_follow off
-    exec "$herdr_bin" pane move "$pane" --new-tab --tab-label "$label" --label "$label" --no-focus
+    "$herdr_bin" pane move "$pane" --new-tab --tab-label "$label" --label "$label" --no-focus \
+      | node "$script_dir/herdr-rekey.mjs" "$pane"
     ;;
   ERROR)
     fail "${decision#ERROR }"

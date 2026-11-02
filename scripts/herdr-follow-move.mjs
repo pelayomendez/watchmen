@@ -70,17 +70,42 @@ function isAlive(pid) {
 }
 
 /**
- * The watch is dead when the launcher's pid in the pointer no longer runs: its pane may still be
- * labelled, holding the shell claude left behind. No pointer, or no pid in it: assume alive.
+ * Whether the watch in a herdr pane still runs. The launcher records each watch it starts inside
+ * herdr in watchmen/panes/<pane id> (its pid, which exec hands to claude, and its folder), so two
+ * watches in two places never answer for each other. A pane with no record (one summon has just
+ * labelled, before the launcher wrote it) or an unreadable one counts as alive.
  */
-export function isWatchAlive(env = process.env) {
+export function isPaneAlive(paneId, env = process.env) {
+  if (!/^[A-Za-z0-9_:.-]{1,128}$/.test(paneId ?? '') || paneId.startsWith('-')) return true
   try {
-    const pointer = join(env.XDG_STATE_HOME || join(homedir(), '.local', 'state'), 'watchmen', 'current')
-    const pid = Number(readFileSync(pointer, 'utf8').split('\n')[1])
-    return !Number.isInteger(pid) || pid <= 0 || isAlive(pid)
+    const record = JSON.parse(readFileSync(join(paths(env).dir, 'panes', paneId), 'utf8'))
+    return !Number.isInteger(record?.pid) || record.pid <= 0 || isAlive(record.pid)
   } catch {
     return true
   }
+}
+
+/**
+ * Moves a watch's record to the pane's new id after `herdr pane move`, which may give the pane a
+ * new id (its answer names it, as `previous_pane_id` beside the moved `pane`). Without this the
+ * moved watch would have no record and could never be found dead.
+ */
+export function rekeyPane(previousId, moveAnswer, env = process.env) {
+  const safe = id => typeof id === 'string' && /^[A-Za-z0-9_:.-]{1,128}$/.test(id) && !id.startsWith('-')
+  let next
+  try {
+    const answer = JSON.parse(moveAnswer)
+    next = answer?.result?.pane?.pane_id ?? answer?.pane?.pane_id
+  } catch {
+    return
+  }
+  if (!safe(previousId) || !safe(next) || next === previousId) return
+  const panes = join(paths(env).dir, 'panes')
+  try {
+    const record = JSON.parse(readFileSync(join(panes, previousId), 'utf8'))
+    writeFileSync(join(panes, next), `${JSON.stringify({ ...record, pane_id: next })}\n`)
+    rmSync(join(panes, previousId), { force: true })
+  } catch {}
 }
 
 /**
@@ -160,7 +185,7 @@ export function followOnce(eventJson, env = process.env) {
     const panesJson = herdrJson(env, 'pane', 'list')
     const decision = decideFollow({
       isFollowing: isFollowing(env),
-      isWatchAlive: isWatchAlive(env),
+      isPaneAlive: paneId => isPaneAlive(paneId, env),
       eventJson: held.hasWaited ? focusedNow(panesJson) : eventJson,
       panesJson,
       tabsJson: herdrJson(env, 'tab', 'list'),
@@ -168,11 +193,12 @@ export function followOnce(eventJson, env = process.env) {
     const [verb, ...rest] = decision.split(' ')
     if (verb === 'MOVE') {
       const [pane, tab, target] = rest
-      execFileSync(
+      const answer = execFileSync(
         herdr(env),
         ['pane', 'move', pane, '--tab', tab, '--target-pane', target, '--split', 'right', '--ratio', ratioOf(env), '--no-focus'],
-        { stdio: 'ignore', timeout: 5_000, env },
+        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5_000, env },
       )
+      rekeyPane(pane, answer ?? '', env)
     } else if (verb === 'STOP') {
       setFollow(false, env)
     }

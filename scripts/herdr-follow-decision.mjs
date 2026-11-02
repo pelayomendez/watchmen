@@ -36,12 +36,11 @@ function listOf(json, key) {
 }
 
 /**
- * @param input `isFollowing` (boolean), `isWatchAlive` (the launcher's pid still runs), `eventJson`,
+ * @param input `isFollowing` (boolean), `isPaneAlive(paneId)` (that pane's watch still runs), `eventJson`,
  *   `panesJson`, `tabsJson`
  */
-export function decideFollow({ isFollowing, isWatchAlive = true, eventJson, panesJson, tabsJson }) {
+export function decideFollow({ isFollowing, isPaneAlive = () => true, eventJson, panesJson, tabsJson }) {
   if (!isFollowing) return 'SKIP follow is off'
-  if (!isWatchAlive) return 'STOP the watch has ended'
   const focus = focusedTabOf(eventJson)
   if (!focus) return 'ERROR the event names no tab'
   if (!isSafeId(focus.tab_id)) return 'ERROR the event names an unsafe tab id'
@@ -51,6 +50,7 @@ export function decideFollow({ isFollowing, isWatchAlive = true, eventJson, pane
   const watch = panes.find(pane => pane?.label === WATCHMEN_LABEL)
   if (!watch) return 'STOP the watch pane is gone'
   if (!isSafeId(watch.pane_id)) return 'ERROR the watchmen pane has an unsafe id'
+  if (!isPaneAlive(watch.pane_id)) return 'STOP the watch has ended'
   if (watch.tab_id === focus.tab_id) return 'SKIP already in this tab'
 
   const workspace = focus.workspace_id ?? panes.find(pane => pane?.tab_id === focus.tab_id)?.workspace_id

@@ -111,7 +111,7 @@ description = "summon the watch"
 
 herdr 0.9.0 does not run plugin event hooks on tab switches made in the UI, so summon also starts a small follower process (`scripts/herdr-follower.mjs`: detached, one at a time, its pid in `follower.pid`) that subscribes to `tab.focused` on the herdr socket. From herdr 0.9.5 the manifest's `tab.focused` hook fires on UI switches too. Both run the same follow step under one move lock: the step skips the tab the watch is already in and its own `watchmen` tab, stays within its space, and a run that had to wait for the lock decides from the tab focused once it holds it, so the last switch wins and one switch moves the pane once. The follower exits when follow turns off, the watch pane is gone, the watch's launcher has exited, or the socket closes. The state lives in `${XDG_STATE_HOME:-~/.local/state}/watchmen/follow`.
 
-When claude exits, the launcher takes the `watchmen` label off its pane, and summon treats a labelled pane whose launcher is gone as no watch: it clears the label and starts a new one.
+Inside herdr the launcher records each watch under `watchmen/panes/<pane id>` (claude's pid, as the launcher execs it, and the folder), and a move carries the record to the pane's new id. Follow and summon judge a labelled pane by its own record, so a watch started elsewhere never answers for it: when that pid is gone, follow stops and summon clears the leftover pane's label and starts a new watch.
 
 To try the follower by hand, with the watch already running in herdr:
 

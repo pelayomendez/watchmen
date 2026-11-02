@@ -69,24 +69,25 @@ fi
 
 mkdir -p .companion
 # Record where the watch is kept, so a board viewer opened in any herdr tab finds this board, and
-# this launcher's id, which lives as long as claude does, so others can tell when the watch ended.
+# this pid, which exec hands to claude, so the viewer can say when that watch has ended.
 state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/watchmen"
 mkdir -p "$state_dir" && printf '%s\n%s\n' "$PWD" "$$" > "$state_dir/current"
-# Inside herdr, label this pane so the summon action can find the watch from any tab, and take the
-# label off again when claude exits: the shell left in the pane is not the watch.
-herdr_pane=""
+# Inside herdr, label this pane so the summon action can find the watch from any tab, and record
+# the watch under watchmen/panes/<pane id>: this pid, which exec hands to claude, and the folder.
+# Follow and summon judge a labelled pane by its own record, so a watch elsewhere never answers for
+# it; once claude exits the pid is gone, and summon replaces the pane's leftover shell.
 if [ -n "${HERDR_PANE_ID:-}" ]; then
   case "$HERDR_PANE_ID" in
     -*|*[!A-Za-z0-9_:.-]*) ;;
-    *) herdr_pane="$HERDR_PANE_ID" ;;
+    *)
+      "${HERDR_BIN_PATH:-herdr}" pane rename "$HERDR_PANE_ID" watchmen >/dev/null 2>&1 || true
+      mkdir -p "$state_dir/panes"
+      node -e 'require("fs").writeFileSync(process.argv[1], JSON.stringify({ pane_id: process.argv[2], pid: Number(process.argv[3]), cwd: process.argv[4] }) + "\n")' \
+        "$state_dir/panes/$HERDR_PANE_ID" "$HERDR_PANE_ID" "$$" "$PWD" || true
+      ;;
   esac
-fi
-if [ -n "$herdr_pane" ]; then
-  "${HERDR_BIN_PATH:-herdr}" pane rename "$herdr_pane" watchmen >/dev/null 2>&1 || true
-  trap '"${HERDR_BIN_PATH:-herdr}" pane rename "$herdr_pane" --clear >/dev/null 2>&1 || true' EXIT
 fi
 export WATCHMEN=1
 export WATCHMEN_SKILL="$skill"
 
-# Not exec: this shell stays as the watch's pid in the pointer, and its EXIT trap clears the label.
-claude --name watchmen --plugin-dir "$ROOT" --append-system-prompt "$briefing" "${@:-Begin the watch.}"
+exec claude --name watchmen --plugin-dir "$ROOT" --append-system-prompt "$briefing" "${@:-Begin the watch.}"
