@@ -10,7 +10,10 @@ set -uo pipefail
 herdr_bin="${HERDR_BIN_PATH:-herdr}"
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 root="$(cd "$script_dir/.." && pwd)"
-ratio="0.35"
+# herdr's --ratio is the FIRST pane's share: 0.7 leaves you 70% and the watch 30%. WATCHMEN_RATIO
+# overrides it with 0.1 to 0.9 (up to three decimals); anything else is ignored.
+ratio="0.7"
+if [[ "${WATCHMEN_RATIO:-}" =~ ^0?\.([1-8][0-9]{0,2}|9|90{1,2})$ ]]; then ratio="$WATCHMEN_RATIO"; fi
 label="watchmen"
 
 fail() {
@@ -56,25 +59,39 @@ set_follow() {
   fi
 }
 
-read -r verb a b c rest <<<"$decision"
+# Splits beside <target> in <tab>, labels the new pane and starts watchmen in it, in the watch
+# folder of the last watch or else <cwd>.
+spawn_beside() {
+  local tab="$1" target="$2" cwd="$3" folder created pane
+  safe_id "$tab" && safe_id "$target" || fail "unsafe id in decision"
+  folder="$(watch_folder || true)"
+  [ -n "$folder" ] || folder="$cwd"
+  case "$folder" in /*) [ -d "$folder" ] || folder="" ;; *) folder="" ;; esac
+  args=(pane split "$target" --direction right --ratio "$ratio" --focus)
+  [ -n "$folder" ] && args+=(--cwd "$folder")
+  created="$("$herdr_bin" "${args[@]}" 2>/dev/null)" || fail "pane split failed"
+  pane="$(printf '%s' "$created" | new_pane_id)"
+  safe_id "$pane" || fail "pane split gave no usable pane id"
+  "$herdr_bin" pane rename "$pane" "$label" >/dev/null 2>&1 || true
+  set_follow on
+  exec "$herdr_bin" pane run "$pane" "$(printf '%q' "$root/bin/watchmen")"
+}
+
+read -r verb a b c d rest <<<"$decision"
 case "$verb" in
   SPAWN)
-    tab="$a"; target="$b"
     # The cwd is the rest of the line after the two ids, spaces and all.
     cwd=""
     [ -n "$c" ] && cwd="${decision#SPAWN "$a" "$b" }"
-    safe_id "$tab" && safe_id "$target" || fail "unsafe id in decision"
-    folder="$(watch_folder || true)"
-    [ -n "$folder" ] || folder="$cwd"
-    case "$folder" in /*) [ -d "$folder" ] || folder="" ;; *) folder="" ;; esac
-    args=(pane split "$target" --direction right --ratio "$ratio" --focus)
-    [ -n "$folder" ] && args+=(--cwd "$folder")
-    created="$("$herdr_bin" "${args[@]}" 2>/dev/null)" || fail "pane split failed"
-    pane="$(printf '%s' "$created" | new_pane_id)"
-    safe_id "$pane" || fail "pane split gave no usable pane id"
-    "$herdr_bin" pane rename "$pane" "$label" >/dev/null 2>&1 || true
-    set_follow on
-    exec "$herdr_bin" pane run "$pane" "$(printf '%q' "$root/bin/watchmen")"
+    spawn_beside "$a" "$b" "$cwd"
+    ;;
+  RESPAWN)
+    # The old pane is a shell claude left behind: it loses the label, so it is no longer the watch.
+    safe_id "$a" || fail "unsafe id in decision"
+    "$herdr_bin" pane rename "$a" --clear >/dev/null 2>&1 || true
+    cwd=""
+    [ -n "$d" ] && cwd="${decision#RESPAWN "$a" "$b" "$c" }"
+    spawn_beside "$b" "$c" "$cwd"
     ;;
   BRING)
     pane="$a"; tab="$b"; target="$c"

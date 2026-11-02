@@ -69,17 +69,24 @@ fi
 
 mkdir -p .companion
 # Record where the watch is kept, so a board viewer opened in any herdr tab finds this board, and
-# this process's id, which exec hands to claude, so the viewer can tell when the watch has ended.
+# this launcher's id, which lives as long as claude does, so others can tell when the watch ended.
 state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/watchmen"
 mkdir -p "$state_dir" && printf '%s\n%s\n' "$PWD" "$$" > "$state_dir/current"
-# Inside herdr, label this pane so the summon action can find the watch from any tab.
+# Inside herdr, label this pane so the summon action can find the watch from any tab, and take the
+# label off again when claude exits: the shell left in the pane is not the watch.
+herdr_pane=""
 if [ -n "${HERDR_PANE_ID:-}" ]; then
   case "$HERDR_PANE_ID" in
     -*|*[!A-Za-z0-9_:.-]*) ;;
-    *) "${HERDR_BIN_PATH:-herdr}" pane rename "$HERDR_PANE_ID" watchmen >/dev/null 2>&1 || true ;;
+    *) herdr_pane="$HERDR_PANE_ID" ;;
   esac
+fi
+if [ -n "$herdr_pane" ]; then
+  "${HERDR_BIN_PATH:-herdr}" pane rename "$herdr_pane" watchmen >/dev/null 2>&1 || true
+  trap '"${HERDR_BIN_PATH:-herdr}" pane rename "$herdr_pane" --clear >/dev/null 2>&1 || true' EXIT
 fi
 export WATCHMEN=1
 export WATCHMEN_SKILL="$skill"
 
-exec claude --name watchmen --plugin-dir "$ROOT" --append-system-prompt "$briefing" "${@:-Begin the watch.}"
+# Not exec: this shell stays as the watch's pid in the pointer, and its EXIT trap clears the label.
+claude --name watchmen --plugin-dir "$ROOT" --append-system-prompt "$briefing" "${@:-Begin the watch.}"

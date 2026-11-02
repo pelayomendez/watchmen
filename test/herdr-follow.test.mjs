@@ -12,6 +12,11 @@ const TABS = tabs({ tab_id: 'w1:t1', label: 'api', workspace_id: 'w1' }, { tab_i
 
 const decide = over => decideFollow({ isFollowing: true, eventJson: event('w1:t2'), tabsJson: TABS, ...over })
 
+test('stops when the watch has ended, whatever the panes say', () => {
+  const json = panes(pane('w1:p7', 'w1:t1', WATCH), pane('w1:p2', 'w1:t2', { focused: true }))
+  assert.equal(decide({ panesJson: json, isWatchAlive: false }), 'STOP the watch has ended')
+})
+
 test('follows into the newly focused tab, beside the pane that has focus there', () => {
   const json = panes(pane('w1:p7', 'w1:t1', WATCH), pane('w1:p1', 'w1:t1'), pane('w1:p2', 'w1:t2'), pane('w1:p3', 'w1:t2', { focused: true }))
   assert.equal(decide({ panesJson: json }), 'MOVE w1:p7 w1:t2 w1:p3')
@@ -57,12 +62,12 @@ test('reads the focused tab wherever herdr nests it in the event', () => {
 
 // The hook itself against a fake herdr: what it would run, never a live session.
 import { spawn } from 'node:child_process'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-function sandbox({ follow, panesJson, lock = false }) {
+function sandbox({ follow, panesJson, lockOwner, pointer }) {
   const dir = mkdtempSync(join(tmpdir(), 'follow '))
   const bin = join(dir, 'herdr')
   writeFileSync(
@@ -82,7 +87,11 @@ esac
   const state = join(dir, 'state', 'watchmen')
   mkdirSync(state, { recursive: true })
   if (follow) writeFileSync(join(state, 'follow'), `${follow}\n`)
-  if (lock) mkdirSync(join(state, 'follow.lock'))
+  if (lockOwner) {
+    mkdirSync(join(state, 'follow.lock'))
+    writeFileSync(join(state, 'follow.lock', 'owner'), lockOwner)
+  }
+  if (pointer) writeFileSync(join(state, 'current'), pointer)
   const env = { ...process.env, HERDR_BIN_PATH: bin, FAKE_PANES: join(dir, 'panes.json'), FAKE_TABS: join(dir, 'tabs.json'), FAKE_LOG: join(dir, 'log'), XDG_STATE_HOME: join(dir, 'state') }
   const run = eventJson =>
     new Promise(resolve => {
@@ -101,7 +110,7 @@ const BESIDE = panes(pane('w1:p7', 'w1:t1', WATCH), pane('w1:p2', 'w1:t2', { foc
 test('the hook moves the watch without taking focus', async () => {
   const box = sandbox({ follow: 'on', panesJson: BESIDE })
   await box.run(event('w1:t2'))
-  assert.deepEqual(box.calls(), ['herdr pane move w1:p7 --tab w1:t2 --target-pane w1:p2 --split right --ratio 0.35 --no-focus'])
+  assert.deepEqual(box.calls(), ['herdr pane move w1:p7 --tab w1:t2 --target-pane w1:p2 --split right --ratio 0.7 --no-focus'])
 })
 
 test('the hook gives way when a newer event arrives within the debounce', async () => {
@@ -115,15 +124,45 @@ test('the hook gives way when a newer event arrives within the debounce', async 
   assert.deepEqual(box.calls(), [])
 })
 
-test('the hook does nothing while follow is off or another move holds the lock', async () => {
+test('the hook does nothing while follow is off', async () => {
   const off = sandbox({ follow: 'off', panesJson: BESIDE })
   await off.run(event('w1:t2'))
   assert.deepEqual(off.calls(), [])
-  const locked = sandbox({ follow: 'on', panesJson: BESIDE, lock: true })
-  await locked.run(event('w1:t2'))
-  assert.deepEqual(locked.calls(), [])
 })
 
+test('a run that waits for the lock follows the tab focused once it holds it', async () => {
+  // A live owner (this test process) holds the lock; the event names the watch's own tab, but by
+  // the time the lock frees the person is in w1:t2, and that is where the watch goes.
+  const box = sandbox({ follow: 'on', panesJson: BESIDE, lockOwner: `${process.pid}:held` })
+  const done = box.run(event('w1:t1'))
+  await new Promise(resolve => setTimeout(resolve, 400))
+  assert.deepEqual(box.calls(), [])
+  rmSync(join(box.state, 'follow.lock'), { recursive: true, force: true })
+  await done
+  assert.deepEqual(box.calls(), ['herdr pane move w1:p7 --tab w1:t2 --target-pane w1:p2 --split right --ratio 0.7 --no-focus'])
+})
+
+test('a lock whose owner died is taken over at once', async () => {
+  const box = sandbox({ follow: 'on', panesJson: BESIDE, lockOwner: '999999:dead' })
+  await box.run(event('w1:t2'))
+  assert.equal(box.calls().length, 1)
+  assert.equal(existsSync(join(box.state, 'follow.lock')), false)
+})
+
+test('follow stops once the watch launcher has exited', async () => {
+  const box = sandbox({ follow: 'on', panesJson: BESIDE, pointer: '/ws\n999999\n' })
+  await box.run(event('w1:t2'))
+  assert.deepEqual(box.calls(), [])
+  assert.equal(box.followState(), 'off')
+})
+
+test('the split ratio is the person\'s share, 0.7 unless WATCHMEN_RATIO gives a sane one', async () => {
+  const { ratioOf } = await import('../scripts/herdr-follow-move.mjs')
+  assert.equal(ratioOf({}), '0.7')
+  assert.equal(ratioOf({ WATCHMEN_RATIO: '0.6' }), '0.6')
+  assert.equal(ratioOf({ WATCHMEN_RATIO: '.75' }), '.75')
+  for (const bad of ['0.05', '0.95', '1', '0.5abc', '--help', '0.5 --focus', '']) assert.equal(ratioOf({ WATCHMEN_RATIO: bad }), '0.7', bad)
+})
 test('the hook turns follow off once the watch pane is gone', async () => {
   const box = sandbox({ follow: 'on', panesJson: panes(pane('w1:p2', 'w1:t2', { focused: true })) })
   await box.run(event('w1:t2'))

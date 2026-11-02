@@ -99,7 +99,7 @@ test('the follower subscribes, follows a tab switch, and stops when the watch pa
     w.send({ event: 'tab_focused', data: { type: 'tab_focused', tab_id: 'w1:t2', workspace_id: 'w1' } })
     await until(() => w.calls().length > 0)
     await wait(300)
-    assert.deepEqual(w.calls(), ['herdr pane move w1:p7 --tab w1:t2 --target-pane w1:p2 --split right --ratio 0.35 --no-focus'])
+    assert.deepEqual(w.calls(), ['herdr pane move w1:p7 --tab w1:t2 --target-pane w1:p2 --split right --ratio 0.7 --no-focus'])
 
     w.setPanes([{ pane_id: 'w1:p2', tab_id: 'w1:t2', workspace_id: 'w1', focused: true }])
     w.send({ event: 'pane_exited', data: { type: 'pane_exited', pane_id: 'w1:p7', workspace_id: 'w1' } })
@@ -128,4 +128,21 @@ test('a second follower does not start while one runs, and none starts while fol
   writeFileSync(join(w.state, 'follow'), 'off\n')
   assert.equal(await exited(w.start()), 0)
   w.cleanup()
+})
+
+test('a pidfile naming a pid that is not a follower is stale: the new follower claims it', async () => {
+  const w = world()
+  w.setPanes([{ pane_id: 'w1:p7', tab_id: 'w1:t1', workspace_id: 'w1', label: 'watchmen', focused: true }])
+  // This test runner's own pid: alive, but not running herdr-follower.mjs.
+  writeFileSync(join(w.state, 'follower.pid'), `${process.pid}\n`)
+  const child = w.start()
+  const server = await w.connected
+  try {
+    assert.equal(readFileSync(join(w.state, 'follower.pid'), 'utf8').trim(), String(child.pid))
+  } finally {
+    child.kill('SIGTERM')
+    await exited(child)
+    server.close()
+    w.cleanup()
+  }
 })

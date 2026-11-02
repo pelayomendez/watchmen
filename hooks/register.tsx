@@ -243,8 +243,7 @@ async function runCheck($: EngineInterface, item: Item, now: number) {
     if (changedTitle) {
       $.ui.toast(`⚛ ${changedTitle} changed`, { timeoutMs: 8_000 })
       const title = changedTitle
-      const held = (await $.state.get(WATCH)).value
-      if (held) await $.state.set(WATCH, { ...held, wake: queueWake(held.wake ?? { pending: [] }, [title]) })
+      await patchWatch($, watch => ({ ...watch, wake: queueWake(watch.wake ?? { pending: [] }, [title]) }))
     }
   } finally {
     running.delete(item.id)
@@ -270,19 +269,46 @@ async function publishSidebar($: EngineInterface, herdr: { bin: string; workspac
   await $.process.run(argv).catch(() => undefined)
 }
 
+/**
+ * Changes the watch with a versioned read-modify-write, so a write from a concurrent hook (a check
+ * queueing a wake while a tick writes `warned`) is never lost to a stale copy.
+ */
+async function patchWatch($: EngineInterface, fn: (watch: Watch) => Watch) {
+  await update($, WATCH, watch => (watch ? fn(watch) : (watch as unknown as Watch)))
+}
+
 // Whether the main loop is in a turn: a wake waits for it to end. A reload starts it false, and
 // the engine queues a submitted prompt until the session is idle anyway.
 let isTurnRunning = false
 
-/** Wakes the watch to triage what changed, at most every three minutes and never over the person. */
+// A wake under way: the next tick does not start another while submit has not settled.
+let isWaking = false
+
+/**
+ * Wakes the watch to triage what changed, at most every three minutes and never over the person.
+ * The queue is cleared only once the prompt went in, and only of what that prompt covered, so a
+ * failed submit or a change queued meanwhile still wakes the watch later.
+ */
 async function maybeWake($: EngineInterface, now: number) {
+  if (isWaking) return
   const watch = (await $.state.get(WATCH)).value
   if (!watch?.wake || watch.wake.pending.length === 0) return
   const draft = (await $.prompt.read()).text
   const decision = wakePrompt(watch.wake, { now, isTurnRunning, draft })
   if (!('text' in decision)) return
-  await $.state.set(WATCH, { ...watch, wake: { pending: [], lastWakeAt: now } })
-  void $.prompt.submit({ text: decision.text }).catch(error => $.ui.log(`watchmen: wake failed: ${String(error)}`))
+  const covered = new Set(watch.wake.pending)
+  isWaking = true
+  try {
+    await $.prompt.submit({ text: decision.text })
+    await patchWatch($, held => ({
+      ...held,
+      wake: { pending: (held.wake?.pending ?? []).filter(title => !covered.has(title)), lastWakeAt: now },
+    }))
+  } catch (error) {
+    $.ui.log(`watchmen: wake failed: ${String(error)}`)
+  } finally {
+    isWaking = false
+  }
 }
 
 /**
@@ -295,7 +321,8 @@ async function pingNeedsYou($: EngineInterface, items: readonly Item[]) {
   const text = items.map(one => sanitize(one.note ? `${one.title}: ${one.note}` : one.title)).join(' · ')
   void $.ui.notify(text, { title: '⚛ watchmen' }).catch(() => undefined)
   if (watch?.herdr) {
-    const argv = [watch.herdr.bin, 'notification', 'show', '⚛ watchmen', '--body', text, '--sound', 'request']
+    // --body=<text> in one argument: a body that starts with "--" is not read as a flag.
+    const argv = [watch.herdr.bin, 'notification', 'show', '⚛ watchmen', `--body=${text}`, '--sound', 'request']
     void $.process.run(argv).catch(() => undefined)
   }
 }
@@ -316,9 +343,9 @@ async function tick($: EngineInterface) {
   // Warn once per long window: re-arm when the window drops back, as after /clear or compaction.
   if (!watch.warned && percent >= HANDOFF_AT) {
     $.ui.toast('The watch is long. Write the handoff before the window fills.', { timeoutMs: 10_000 })
-    await $.state.set(WATCH, { ...watch, warned: true })
+    await patchWatch($, held => ({ ...held, warned: true }))
   } else if (watch.warned && percent < HANDOFF_AT) {
-    await $.state.set(WATCH, { ...watch, warned: false })
+    await patchWatch($, held => ({ ...held, warned: false }))
   }
 }
 

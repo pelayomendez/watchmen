@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url'
 
 import { decideSummon, isSafeId } from '../scripts/herdr-summon-decision.mjs'
 
-const pane = (pane_id, tab_id, extra = {}) => ({ pane_id, tab_id, focused: false, ...extra })
+const pane = (pane_id, tab_id, extra = {}) => ({ pane_id, tab_id, workspace_id: tab_id.split(':')[0], focused: false, ...extra })
 const list = (...panes) => JSON.stringify({ result: { panes } })
 const WATCH = { label: 'watchmen' }
 
@@ -27,6 +27,16 @@ test('running in this tab, focused or not: send it back to a tab of its own', ()
   assert.equal(decideSummon(list(pane('w1:p1', 'w1:t1', { focused: true }), pane('w1:p7', 'w1:t1', WATCH))), 'SEND w1:p7')
 })
 
+test('a watch is never brought across spaces', () => {
+  const json = list(pane('w2:p1', 'w2:t1', { focused: true }), pane('w1:p7', 'w1:t3', WATCH))
+  assert.equal(decideSummon(json), 'ERROR the watch runs in another space; summon it from there')
+})
+
+test('a labelled pane whose watch has ended is replaced, not brought', () => {
+  const json = list(pane('w1:p1', 'w1:t1', { focused: true, cwd: '/repo' }), pane('w1:p7', 'w1:t3', WATCH))
+  assert.equal(decideSummon(json, { isWatchAlive: false }), 'RESPAWN w1:p7 w1:t1 w1:p1 /repo')
+})
+
 test('garbage or unsafe ids decide nothing', () => {
   assert.match(decideSummon('not json'), /^ERROR pane list is not JSON/)
   assert.equal(decideSummon('{"result":{}}'), 'ERROR pane list has no panes')
@@ -41,7 +51,7 @@ test('garbage or unsafe ids decide nothing', () => {
 })
 
 // The action script against a fake herdr: what it would run, never a live session.
-function summon(panes, { pointer } = {}) {
+function summon(panes, { pointer, pid = '123', ratio } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'summon '))
   try {
     const bin = join(dir, 'herdr')
@@ -59,11 +69,11 @@ if [ "$1 $2" = "pane split" ]; then echo '{"result":{"type":"pane_created","pane
     const state = join(dir, 'state')
     if (pointer) {
       mkdirSync(join(state, 'watchmen'), { recursive: true })
-      writeFileSync(join(state, 'watchmen', 'current'), `${pointer}\n123\n`)
+      writeFileSync(join(state, 'watchmen', 'current'), `${pointer}\n${pid}\n`)
     }
     const script = fileURLToPath(new URL('../scripts/herdr-summon.sh', import.meta.url))
     const run = spawnSync('bash', [script], {
-      env: { ...process.env, HERDR_SOCKET_PATH: join(dir, 'no.sock'), HERDR_BIN_PATH: bin, FAKE_PANES: join(dir, 'panes.json'), FAKE_LOG: join(dir, 'log'), XDG_STATE_HOME: state },
+      env: { ...process.env, WATCHMEN_RATIO: ratio ?? '', HERDR_SOCKET_PATH: join(dir, 'no.sock'), HERDR_BIN_PATH: bin, FAKE_PANES: join(dir, 'panes.json'), FAKE_LOG: join(dir, 'log'), XDG_STATE_HOME: state },
       encoding: 'utf8',
     })
     const followFile = join(state, 'watchmen', 'follow')
@@ -79,7 +89,7 @@ test('the summon script spawns, brings and sends through the herdr CLI', () => {
   const spawned = summon(list(pane('w1:p1', 'w1:t1', { focused: true, cwd: tmpdir() })), { pointer: root })
   assert.equal(spawned.status, 0, spawned.stderr)
   assert.deepEqual(spawned.calls.slice(0, 2), [
-    `herdr pane split w1:p1 --direction right --ratio 0.35 --focus --cwd ${root}`,
+    `herdr pane split w1:p1 --direction right --ratio 0.7 --focus --cwd ${root}`,
     'herdr pane rename w1:p9 watchmen',
   ])
   assert.match(spawned.calls[2], /^herdr pane run w1:p9 .*bin\/watchmen$/)
@@ -89,18 +99,36 @@ test('the summon script spawns, brings and sends through the herdr CLI', () => {
   const spaced = mkdtempSync(join(tmpdir(), 'my app '))
   try {
     const here = summon(list(pane('w1:p1', 'w1:t1', { focused: true, cwd: spaced })))
-    assert.equal(here.calls[0], `herdr pane split w1:p1 --direction right --ratio 0.35 --focus --cwd ${spaced}`)
+    assert.equal(here.calls[0], `herdr pane split w1:p1 --direction right --ratio 0.7 --focus --cwd ${spaced}`)
   } finally {
     rmSync(spaced, { recursive: true, force: true })
   }
 
   const brought = summon(list(pane('w1:p1', 'w1:t1', { focused: true }), pane('w1:p7', 'w1:t3', WATCH)))
-  assert.deepEqual(brought.calls, ['herdr pane move w1:p7 --tab w1:t1 --target-pane w1:p1 --split right --ratio 0.35 --focus'])
+  assert.deepEqual(brought.calls, ['herdr pane move w1:p7 --tab w1:t1 --target-pane w1:p1 --split right --ratio 0.7 --focus'])
   assert.equal(brought.follow, 'on')
 
   const sent = summon(list(pane('w1:p1', 'w1:t1', { focused: true }), pane('w1:p7', 'w1:t1', WATCH)))
   assert.deepEqual(sent.calls, ['herdr pane move w1:p7 --new-tab --tab-label watchmen --label watchmen --no-focus'])
   assert.equal(sent.follow, 'off')
+})
+
+test('the summon script replaces a dead watch and honours a sane WATCHMEN_RATIO', () => {
+  const root = fileURLToPath(new URL('..', import.meta.url)).replace(/\/$/, '')
+  const dead = summon(list(pane('w1:p1', 'w1:t1', { focused: true }), pane('w1:p7', 'w1:t3', WATCH)), { pointer: root, pid: '999999' })
+  assert.equal(dead.status, 0, dead.stderr)
+  assert.deepEqual(dead.calls.slice(0, 3), [
+    'herdr pane rename w1:p7 --clear',
+    `herdr pane split w1:p1 --direction right --ratio 0.7 --focus --cwd ${root}`,
+    'herdr pane rename w1:p9 watchmen',
+  ])
+
+  const wider = summon(list(pane('w1:p1', 'w1:t1', { focused: true }), pane('w1:p7', 'w1:t3', WATCH)), { ratio: '0.6' })
+  assert.match(wider.calls[0], /--ratio 0\.6 /)
+  for (const bad of ['0.5abc', '1', '--focus', '0.95']) {
+    const run = summon(list(pane('w1:p1', 'w1:t1', { focused: true }), pane('w1:p7', 'w1:t3', WATCH)), { ratio: bad })
+    assert.match(run.calls[0], /--ratio 0\.7 /, bad)
+  }
 })
 
 test('the summon script does nothing on garbage and says why', () => {

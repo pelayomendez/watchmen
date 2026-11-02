@@ -36,10 +36,12 @@ function listOf(json, key) {
 }
 
 /**
- * @param input `isFollowing` (boolean), `eventJson`, `panesJson`, `tabsJson`
+ * @param input `isFollowing` (boolean), `isWatchAlive` (the launcher's pid still runs), `eventJson`,
+ *   `panesJson`, `tabsJson`
  */
-export function decideFollow({ isFollowing, eventJson, panesJson, tabsJson }) {
+export function decideFollow({ isFollowing, isWatchAlive = true, eventJson, panesJson, tabsJson }) {
   if (!isFollowing) return 'SKIP follow is off'
+  if (!isWatchAlive) return 'STOP the watch has ended'
   const focus = focusedTabOf(eventJson)
   if (!focus) return 'ERROR the event names no tab'
   if (!isSafeId(focus.tab_id)) return 'ERROR the event names an unsafe tab id'
