@@ -228,3 +228,48 @@ esac
   assert.equal(followOnce(event('w1:t2'), env), 'SKIP already in this tab')
   assert.equal(readFileSync(log, 'utf8').trim().split('\n').length, 1)
 })
+
+// A fake herdr whose pane list answers from a sequence of files, one per call, the last repeating.
+function flickerWorld(sequence) {
+  const dir = mkdtempSync(join(tmpdir(), 'flicker '))
+  const bin = join(dir, 'herdr')
+  sequence.forEach((json, at) => writeFileSync(join(dir, `panes.${at}.json`), json))
+  writeFileSync(
+    bin,
+    `#!/usr/bin/env bash
+case "$1 $2" in
+  "pane list")
+    n=$(cat "$FAKE_DIR/count" 2>/dev/null || echo 0)
+    f="$FAKE_DIR/panes.$n.json"; [ -f "$f" ] || f="$FAKE_DIR/panes.${sequence.length - 1}.json"
+    echo $((n + 1)) > "$FAKE_DIR/count"; cat "$f" ;;
+  "tab list") cat "$FAKE_DIR/tabs.json" ;;
+  *) printf '%s\\n' "herdr $*" >> "$FAKE_DIR/log" ;;
+esac
+`,
+  )
+  chmodSync(bin, 0o755)
+  writeFileSync(join(dir, 'tabs.json'), TABS)
+  mkdirSync(join(dir, 'state', 'watchmen'), { recursive: true })
+  writeFileSync(join(dir, 'state', 'watchmen', 'follow'), 'on\n')
+  const env = { ...process.env, HERDR_BIN_PATH: bin, FAKE_DIR: dir, XDG_STATE_HOME: join(dir, 'state') }
+  const follow = () => readFileSync(join(dir, 'state', 'watchmen', 'follow'), 'utf8').trim()
+  const log = () => (existsSync(join(dir, 'state', 'watchmen', 'follow.log')) ? readFileSync(join(dir, 'state', 'watchmen', 'follow.log'), 'utf8') : '')
+  return { env, follow, log }
+}
+
+test('a watch missing from one pane list does not turn follow off: a second look finds it and moves it', async () => {
+  const { followOnce } = await import('../scripts/herdr-follow-move.mjs')
+  const gone = panes(pane('w1:p2', 'w1:t2', { focused: true }))
+  const world = flickerWorld([gone, BESIDE])
+  assert.equal(followOnce(event('w1:t2'), world.env, 10), 'MOVE w1:p7 w1:t2 w1:p2')
+  assert.equal(world.follow(), 'on')
+  assert.match(world.log(), /kept following/)
+})
+
+test('a watch gone on both looks turns follow off and says why in follow.log', async () => {
+  const { followOnce } = await import('../scripts/herdr-follow-move.mjs')
+  const world = flickerWorld([panes(pane('w1:p2', 'w1:t2', { focused: true }))])
+  assert.equal(followOnce(event('w1:t2'), world.env, 10), 'STOP the watch pane is gone')
+  assert.equal(world.follow(), 'off')
+  assert.match(world.log(), /follow off: STOP the watch pane is gone/)
+})
