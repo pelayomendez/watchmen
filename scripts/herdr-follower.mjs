@@ -17,7 +17,7 @@ import { fileURLToPath } from 'node:url'
 
 import { isPaneEnd, isTabFocus } from './herdr-follow-decision.mjs'
 import { WATCHMEN_LABEL } from './herdr-summon-decision.mjs'
-import { followOnce, isFollowing, isPaneAlive, paths, setFollow } from './herdr-follow-move.mjs'
+import { followOnce, isFollowing, isPaneAlive, note, paths, setFollow, STOP_CONFIRM_MS } from './herdr-follow-move.mjs'
 
 const DEBOUNCE_MS = 150
 const CHECK_MS = 5_000
@@ -26,6 +26,7 @@ const { dir, pid: pidFile } = paths()
 
 function say(text) {
   process.stderr.write(`watchmen follower: ${text}\n`)
+  note(`follower: ${text}`)
 }
 
 /** Whether a pid runs this follower script: a recycled pid running something else does not count. */
@@ -123,13 +124,20 @@ function isWatchRunning() {
   }
 }
 
-// Follow off, or the watch gone or ended: nothing left to do.
+// Follow off, or the watch gone or ended: nothing left to do. "Gone" must hold on two looks
+// STOP_CONFIRM_MS apart: a pane mid-move, or a slow pane list under load, can miss it once.
+function endIfWatchGone(reason) {
+  if (isWatchRunning()) return
+  setTimeout(() => {
+    if (!isFollowing() || isWatchRunning()) return
+    setFollow(false)
+    stop(`follow off: ${reason}`)
+  }, STOP_CONFIRM_MS)
+}
+
 setInterval(() => {
   if (!isFollowing()) stop('follow is off')
-  if (!isWatchRunning()) {
-    setFollow(false)
-    stop('the watch has ended')
-  }
+  endIfWatchGone('the watch has ended')
 }, CHECK_MS)
 
 let pending
@@ -140,7 +148,7 @@ function onTabFocus(message) {
   pending = setTimeout(() => {
     try {
       const decision = followOnce(lastEvent)
-      if (decision.startsWith('STOP') || decision === 'SKIP follow is off') stop(decision)
+      if (decision.startsWith('STOP') || decision === 'SKIP follow is off') stop(`follow off: ${decision}`)
       if (decision.startsWith('ERROR')) say(decision)
     } catch (error) {
       say(error.message)
@@ -170,10 +178,7 @@ socket.on('data', chunk => {
     }
     if (message.error) stop(`subscribe refused: ${message.error.message ?? 'unknown error'}`)
     if (isTabFocus(message)) onTabFocus(message)
-    else if (isPaneEnd(message) && !isWatchRunning()) {
-      setFollow(false)
-      stop('the watch pane is gone')
-    }
+    else if (isPaneEnd(message)) endIfWatchGone('the watch pane is gone')
   }
 })
 socket.on('error', error => stop(`socket: ${error.message}`))

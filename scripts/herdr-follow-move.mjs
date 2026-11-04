@@ -4,7 +4,7 @@
 // The move lock (a directory) keeps the two, or two runs of either, from moving the pane at once.
 
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { appendFileSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
@@ -12,6 +12,10 @@ import { decideFollow } from './herdr-follow-decision.mjs'
 
 const LOCK_STALE_MS = 10_000
 const LOCK_WAIT_MS = 5_000
+/** How long a "the watch is gone" reading must hold before follow turns off: a pane mid-move or a
+ * slow `herdr pane list` under load can look gone for a moment. */
+export const STOP_CONFIRM_MS = 2_000
+const LOG_MAX_BYTES = 256 * 1024
 
 /**
  * The split ratio: herdr's --ratio is the FIRST pane's share, so 0.7 leaves the person 70% and the
@@ -31,6 +35,7 @@ export function paths(env = process.env) {
     latest: join(dir, 'follow.latest'),
     lock: join(dir, 'follow.lock'),
     pid: join(dir, 'follower.pid'),
+    log: join(dir, 'follow.log'),
   }
 }
 
@@ -40,6 +45,18 @@ export function isFollowing(env = process.env) {
   } catch {
     return false
   }
+}
+
+/** Appends a timestamped line to follow.log, the one place that says why follow changed. */
+export function note(text, env = process.env) {
+  const { dir, log } = paths(env)
+  try {
+    mkdirSync(dir, { recursive: true })
+    try {
+      if (statSync(log).size > LOG_MAX_BYTES) renameSync(log, `${log}.1`)
+    } catch {}
+    appendFileSync(log, `${new Date().toISOString()} [${process.pid}] ${text}\n`)
+  } catch {}
 }
 
 export function setFollow(on, env = process.env) {
@@ -174,22 +191,32 @@ function focusedNow(panesJson) {
 
 /**
  * Runs one follow step for a tab-focus event and answers the decision it acted on. STOP turns
- * follow off; MOVE moves the pane with --no-focus; anything else does nothing. A run that waited
+ * follow off, but only when a second look STOP_CONFIRM_MS later still finds the watch gone; MOVE moves the pane with --no-focus; anything else does nothing. A run that waited
  * for another move decides from the tab focused once it holds the lock, so the last switch wins.
  */
-export function followOnce(eventJson, env = process.env) {
+export function followOnce(eventJson, env = process.env, confirmMs = STOP_CONFIRM_MS) {
   if (!isFollowing(env)) return 'SKIP follow is off'
   const held = acquireLock(env)
   if (!held) return 'SKIP another move is under way'
   try {
-    const panesJson = herdrJson(env, 'pane', 'list')
-    const decision = decideFollow({
-      isFollowing: isFollowing(env),
-      isPaneAlive: paneId => isPaneAlive(paneId, env),
-      eventJson: held.hasWaited ? focusedNow(panesJson) : eventJson,
-      panesJson,
-      tabsJson: herdrJson(env, 'tab', 'list'),
-    })
+    const decide = useFocusedNow => {
+      const panesJson = herdrJson(env, 'pane', 'list')
+      return decideFollow({
+        isFollowing: isFollowing(env),
+        isPaneAlive: paneId => isPaneAlive(paneId, env),
+        eventJson: useFocusedNow ? focusedNow(panesJson) : eventJson,
+        panesJson,
+        tabsJson: herdrJson(env, 'tab', 'list'),
+      })
+    }
+    let decision = decide(held.hasWaited)
+    if (decision.startsWith('STOP ')) {
+      // Look again before giving up on the watch: one reading can catch it mid-move.
+      sleep(confirmMs)
+      const again = decide(true)
+      if (!again.startsWith('STOP ')) note(`kept following: "${decision}" did not hold (${again})`, env)
+      decision = again
+    }
     const [verb, ...rest] = decision.split(' ')
     if (verb === 'MOVE') {
       const [pane, tab, target] = rest
@@ -201,6 +228,9 @@ export function followOnce(eventJson, env = process.env) {
       rekeyPane(pane, answer ?? '', env)
     } else if (verb === 'STOP') {
       setFollow(false, env)
+      note(`follow off: ${decision}`, env)
+    } else if (verb === 'ERROR') {
+      note(`follow step: ${decision}`, env)
     }
     return decision
   } finally {
