@@ -326,7 +326,7 @@ test('as watchmen: an approved check runs on its interval and flags a change', a
   expect(seen.tools).toEqual(['board_track', 'board_move', 'board_drop', 'board_changes'])
   expect(seen.cleared).toContain('WATCHMEN')
   expect(seen.runs).toEqual([['acli', 'jira']])
-  expect(seen.status).toEqual([])
+  expect(seen.status).toEqual([undefined])
   expect(JSON.stringify(await (await mountBand($, 120)).drawn())).toContain('80% · write the handoff')
   expect(seen.toasts).toEqual(['The watch is long. Write the handoff before the window fills.'])
 

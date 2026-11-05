@@ -529,6 +529,8 @@ export const register: Register = on => {
       isDeferred: false,
     })
 
+    // Versions before 0.3 pinned a status line; a reload would leave it on screen, drawn as a warning.
+    $.ui.status(undefined)
     await tick($)
     $.clock.every(TICK_MS, () => void tick($))
 
