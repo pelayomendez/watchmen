@@ -44,3 +44,37 @@ test('inside herdr the launcher labels its pane and records claude\'s own pid fo
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+function launch(env) {
+  const dir = mkdtempSync(join(tmpdir(), 'model '))
+  try {
+    const bin = join(dir, 'bin')
+    mkdirSync(bin)
+    writeFileSync(join(bin, 'claude'), `#!/usr/bin/env bash\nprintf '%s\\n' "$@" > "$CLAUDE_ARGS"\n`)
+    chmodSync(join(bin, 'claude'), 0o755)
+    const skill = join(dir, 'SKILL.md')
+    writeFileSync(skill, '# skill\n')
+    const run = spawnSync('bash', [fileURLToPath(new URL('../bin/watchmen', import.meta.url))], {
+      cwd: dir,
+      encoding: 'utf8',
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, HERDR_PANE_ID: '', XDG_STATE_HOME: join(dir, 'state'), WATCHMEN_SKILL: skill, CLAUDE_ARGS: join(dir, 'args'), ...env },
+    })
+    assert.equal(run.status, 0, run.stderr)
+    const args = readFileSync(join(dir, 'args'), 'utf8').split('\n')
+    return { model: args[args.indexOf('--model') + 1], briefing: args.join('\n') }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+test('the watch runs on sonnet and hands tasks to opus subagents unless told otherwise', () => {
+  const plain = launch({ WATCHMEN_MODEL: '', WATCHMEN_TASK_MODEL: '' })
+  assert.equal(plain.model, 'sonnet')
+  assert.match(plain.briefing, /Agent tool and model "opus"/)
+  const chosen = launch({ WATCHMEN_MODEL: 'haiku', WATCHMEN_TASK_MODEL: 'sonnet' })
+  assert.equal(chosen.model, 'haiku')
+  assert.match(chosen.briefing, /Agent tool and model "sonnet"/)
+  const garbage = launch({ WATCHMEN_MODEL: '--dangerously-skip-permissions', WATCHMEN_TASK_MODEL: 'x"; rm' })
+  assert.equal(garbage.model, 'sonnet')
+  assert.match(garbage.briefing, /Agent tool and model "opus"/)
+})
