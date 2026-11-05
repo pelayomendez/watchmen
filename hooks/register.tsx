@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Item, Watch } from '../types'
+import type { Item, Vitals, Watch } from '../types'
 import {
   applyToBoard,
   approvalLines,
@@ -27,7 +27,10 @@ import {
   wakePrompt,
   sidebarToken,
   isSafeHerdrArg,
-  statusLine,
+  vitals,
+  isRotationDue,
+  ROTATE_PROMPT,
+  resumePrompt,
   summary,
   track,
 } from './board'
@@ -51,7 +54,9 @@ const PANE_TITLE = '⚛ watchmen'
 const NOT_WATCH = 'Watchmen is not keeping the watch in this session.'
 
 const WATCH = { plugin: 'watchmen', key: 'watch' } as const
+const VITALS = { plugin: 'watchmen', key: 'vitals' } as const
 const board = atom({ plugin: 'watchmen', key: 'board' } as const, [])
+const vitalsAtom = atom({ plugin: 'watchmen', key: 'vitals' } as const, {} as Vitals)
 
 export function newestHandoff(names: readonly string[]): string | undefined {
   return names
@@ -60,7 +65,6 @@ export function newestHandoff(names: readonly string[]): string | undefined {
     .at(-1)
 }
 
-export { statusLine } from './board'
 
 const ITEM_PROPERTIES = {
   id: { type: 'string', description: 'Stable id, e.g. NRV-123 or mr-42. Defaults to a slug of the title.' },
@@ -357,6 +361,82 @@ async function pingNeedsYou($: EngineInterface, items: readonly Item[]) {
   }
 }
 
+/** The newest handoff in .companion/, as a path, or undefined. */
+async function latestHandoff($: EngineInterface): Promise<string | undefined> {
+  const entries = (await $.fs.exists(HANDOFF_DIR)) ? await $.fs.list(HANDOFF_DIR) : []
+  const name = newestHandoff(entries.filter(one => one.kind === 'file').map(one => one.name))
+  return name && /^[A-Za-z0-9._-]+$/.test(name) ? `${HANDOFF_DIR}/${name}` : undefined
+}
+
+/**
+ * Rotation: an idle watch with a long conversation writes its handoff, the conversation is
+ * cleared, and the watch resumes from that handoff. Three ticks carry it: ask for the handoff;
+ * once that turn ended with a new handoff on disk, /clear and send the resume prompt; once the
+ * resume turn ended, done. A turn that wrote no handoff, or a /clear refused, gives the
+ * rotation up and the watch goes on as it was.
+ */
+async function maybeRotate($: EngineInterface, now: number, tokens: number | undefined) {
+  const watch = (await $.state.get(WATCH)).value
+  if (!watch || isWaking) return
+  const rotation = watch.rotation
+  if (!rotation) {
+    // The first turn's context size is the fresh start a rotation is measured from.
+    if (watch.baseTokens === undefined) {
+      if (watch.lastTurnAt !== undefined && tokens !== undefined) await patchWatch($, held => ({ ...held, baseTokens: tokens }))
+      return
+    }
+    const draft = (await $.prompt.read()).text
+    if (!isRotationDue({ now, lastTurnAt: watch.lastTurnAt, tokens, baseTokens: watch.baseTokens, isTurnRunning, draft })) return
+    const before = await latestHandoff($)
+    await patchWatch($, held => ({ ...held, rotation: { phase: 'handoff', since: now, before } }))
+    try {
+      await $.prompt.submit({ text: ROTATE_PROMPT })
+    } catch (error) {
+      $.ui.log(`watchmen: rotation not started: ${String(error)}`)
+      await patchWatch($, held => ({ ...held, rotation: undefined, lastTurnAt: now }))
+    }
+    return
+  }
+  if (isTurnRunning || (watch.lastTurnAt ?? 0) <= rotation.since) return
+  if (rotation.phase === 'resume') {
+    await patchWatch($, held => ({ ...held, rotation: undefined }))
+    return
+  }
+  const handoff = await latestHandoff($)
+  if (!handoff || handoff === rotation.before) {
+    $.ui.log('watchmen: no new handoff was written, so the watch did not rotate.')
+    await patchWatch($, held => ({ ...held, rotation: undefined }))
+    return
+  }
+  // The board and the watch are kept across the /clear: restored here if the clear dropped them.
+  const kept = { watch, items: await read($, board) }
+  try {
+    await $.command.run({ command: 'clear', args: '' })
+  } catch (error) {
+    $.ui.log(`watchmen: could not clear the conversation, so the watch did not rotate: ${String(error)}`)
+    await patchWatch($, held => ({ ...held, rotation: undefined }))
+    return
+  }
+  if (!(await $.state.get(WATCH)).value) {
+    await $.state.set(WATCH, kept.watch)
+    await update($, board, () => kept.items)
+  }
+  await patchWatch($, held => ({
+    ...held,
+    handoff,
+    baseTokens: undefined,
+    lastTurnAt: undefined,
+    rotation: { phase: 'resume', since: now },
+    wake: { pending: [], lastWakeAt: now },
+  }))
+  try {
+    await $.prompt.submit({ text: resumePrompt(handoff) })
+  } catch (error) {
+    $.ui.log(`watchmen: the conversation was cleared but the resume prompt failed: ${String(error)}. Tell the watch to read ${handoff}.`)
+    await patchWatch($, held => ({ ...held, rotation: undefined }))
+  }
+}
+
 async function tick($: EngineInterface) {
   const watch = (await $.state.get(WATCH)).value
   if (!watch) return
@@ -366,10 +446,18 @@ async function tick($: EngineInterface) {
     void runCheck($, item, now).catch(error => $.ui.log(`watchmen: check ${item.id} failed: ${String(error)}`))
   }
   if (watch.herdr) void publishSidebar($, watch.herdr, items)
-  await maybeWake($, now)
+  if (!watch.rotation) await maybeWake($, now)
   const { context } = await $.session.usage()
   const percent = context.percent ?? 0
-  $.ui.status(statusLine(items, context.percent, now - watch.startedAt, HANDOFF_AT))
+  // The watch's figures go in the band, where they can be coloured; a plugin's status line is
+  // drawn in the engine's notice colour, which reads as a warning.
+  const idleMs = watch.lastTurnAt === undefined || isTurnRunning ? undefined : now - watch.lastTurnAt
+  const shown = (await $.state.get(VITALS)).value
+  const minute = (ms?: number) => (ms === undefined ? undefined : Math.floor(ms / 60_000))
+  if (shown?.percent !== context.percent || minute(shown?.idleMs) !== minute(idleMs)) {
+    await update($, vitalsAtom, () => ({ percent: context.percent, idleMs }))
+  }
+  await maybeRotate($, now, context.tokens)
   // Warn once per long window: re-arm when the window drops back, as after /clear or compaction.
   if (!watch.warned && percent >= HANDOFF_AT) {
     $.ui.toast('The watch is long. Write the handoff before the window fills.', { timeoutMs: 10_000 })
@@ -452,8 +540,14 @@ export const register: Register = on => {
     return next(e)
   })
 
-  on('turn.complete', ($, e, next) => {
-    if (e.agentId === undefined) isTurnRunning = false
+  on('turn.complete', async ($, e, next) => {
+    if (e.agentId === undefined) {
+      isTurnRunning = false
+      if ((await $.state.get(WATCH)).value) {
+        const now = await $.clock.now()
+        await patchWatch($, held => ({ ...held, lastTurnAt: now }))
+      }
+    }
     return next(e)
   })
 
@@ -560,7 +654,8 @@ export const register: Register = on => {
     }
     if (watch.isBandHidden || e.props.hasSurvey) return next(e)
     const items = await read($, board)
-    const { parts, hasButtons } = bandLayout(items, e.props.bodyColumns)
+    const shown = await read($, vitalsAtom)
+    const { parts, hasButtons } = bandLayout(items, e.props.bodyColumns, vitals(shown.percent, shown.idleMs, HANDOFF_AT))
     const elements = $.ui.resolve(e)
     const { Box, Text, Button } = elements
     const state = mascotState(items)

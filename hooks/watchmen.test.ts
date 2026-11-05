@@ -3,7 +3,7 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 
 import type { Item } from '../types'
-import { applyCheck, applyToBoard, approvalLines, attempt, dueChecks, enteredNeedsYou, MASCOT_COLORS, mascotState, paintAtom, queueWake, SIDEBAR_ROW, sidebarToken, sidebarTokens, wakePrompt, move, parse, parseBoard, serialize, statusLine, summary, track } from './board'
+import { applyCheck, applyToBoard, approvalLines, attempt, dueChecks, enteredNeedsYou, MASCOT_COLORS, mascotState, paintAtom, queueWake, SIDEBAR_ROW, sidebarToken, sidebarTokens, wakePrompt, move, parse, parseBoard, serialize, vitals, isRotationDue, ROTATE_IDLE_MS, ROTATE_PROMPT, summary, track } from './board'
 import { newestBackupOf, newestHandoff } from './register'
 
 const MIN = 60_000
@@ -97,16 +97,21 @@ test('the brief groups items by lane, leaves empty lanes out, and shows what an 
   expect(summary([])).toContain('empty')
 })
 
-test('the status line counts what needs you, what moves and what changed, and asks for the handoff late', () => {
-  const items: Item[] = [
-    { id: 'a', title: 'A', lane: 'needs-you' },
-    { id: 'b', title: 'B', lane: 'needs-you', isChanged: true },
-    { id: 'c', title: 'C', lane: 'moving' },
-    { id: 'd', title: 'D', lane: 'waiting' },
-  ]
-  expect(statusLine(items, 42, 3 * 3_600_000 + 7 * MIN, 75)).toBe('⚛ watchmen · 2 need you · 1 moving · 1 changed · 42% · 3h07')
-  expect(statusLine([], 80, 0, 75)).toBe('⚛ watchmen · 80% · write the handoff')
-  expect(statusLine([], undefined, MIN, 75)).toBe('⚛ watchmen · 0h01')
+test('the band\'s vitals: context fill and idle time, dim; past the line, the handoff reminder alone', () => {
+  expect(vitals(42, 3 * 3_600_000 + 7 * MIN, 75)).toEqual([{ text: '42%', dim: true }, { text: 'idle 3h07', dim: true }])
+  expect(vitals(42, 30_000, 75)).toEqual([{ text: '42%', dim: true }])
+  expect(vitals(80, 10 * MIN, 75)).toEqual([{ text: '80% · write the handoff', color: MASCOT_COLORS.changed, bold: true }])
+  expect(vitals(undefined, undefined, 75)).toEqual([])
+})
+
+test('rotation is due only when idle near the cache\'s end with a conversation grown well past its start', () => {
+  const base = { now: ROTATE_IDLE_MS, lastTurnAt: 0, tokens: 90_000, baseTokens: 30_000, isTurnRunning: false, draft: '' }
+  expect(isRotationDue(base)).toBe(true)
+  expect(isRotationDue({ ...base, now: ROTATE_IDLE_MS - 1 })).toBe(false)
+  expect(isRotationDue({ ...base, tokens: 60_000 })).toBe(false)
+  expect(isRotationDue({ ...base, isTurnRunning: true })).toBe(false)
+  expect(isRotationDue({ ...base, draft: 'hi' })).toBe(false)
+  expect(isRotationDue({ ...base, baseTokens: undefined })).toBe(false)
 })
 
 test('board.json: a round trip keeps the board; an unreadable file is an error, not an empty board', () => {
@@ -165,7 +170,8 @@ function engine(on: On, files: Record<string, string>, percent: number) {
     writes[relative(e.path)] = text
     return { value: undefined }
   })
-  on('session.usage', () => ({ value: { startedAt: 0, context: { window: 200_000, percent }, rateLimits: [] } }))
+  let tokens: number | undefined
+  on('session.usage', () => ({ value: { startedAt: 0, context: { window: 200_000, percent, tokens }, rateLimits: [] } }))
   on('command.register', () => ({ value: undefined }) as never)
   const tools: string[] = []
   on('tool.register', ($, e) => (tools.push(e.name), { value: { tool: `mcp__watchmen__${e.name}` } }))
@@ -221,6 +227,8 @@ function engine(on: On, files: Record<string, string>, percent: number) {
     writes,
     runs,
     setOutput: (text: string) => (output = text),
+    setTokens: (value: number) => (tokens = value),
+    addFile: (path: string, text: string) => (files[path] = text),
     setDraft: (text: string) => (draft = text),
     failNextSubmit: () => (failNextSubmit = true),
     holdSubmit: () => {
@@ -318,7 +326,8 @@ test('as watchmen: an approved check runs on its interval and flags a change', a
   expect(seen.tools).toEqual(['board_track', 'board_move', 'board_drop', 'board_changes'])
   expect(seen.cleared).toContain('WATCHMEN')
   expect(seen.runs).toEqual([['acli', 'jira']])
-  expect(seen.status.at(-1)).toBe('⚛ watchmen · 1 need you · 1 moving · 80% · write the handoff')
+  expect(seen.status).toEqual([])
+  expect(JSON.stringify(await (await mountBand($, 120)).drawn())).toContain('80% · write the handoff')
   expect(seen.toasts).toEqual(['The watch is long. Write the handoff before the window fills.'])
 
   // Ticks every 15 s, but the check waits for its own five minutes.
@@ -717,4 +726,59 @@ test('the band board button opens the board pane', async ($, on) => {
   await seen.clock.settle()
   expect(seen.opened).toContain('board')
   expect(seen.logs.some(line => line.includes('{n}'))).toBe(false)
+})
+
+test('an idle watch with a long conversation writes its handoff, clears, and resumes from it', async ($, on) => {
+  mock.env(on, { WATCHMEN: '1' })
+  const commands: string[] = []
+  on('command.run', { command: 'clear' }, ($$, e) => (commands.push(e.command), { text: '' }) as never)
+  on('turn.complete', () => ({ text: '' }))
+  const seen = engine(on, { '.companion/board.json': BAND_BOARD, '.companion/handoff-2026-11-01.md': 'old' }, 30)
+  await $.session.start(START)
+  await seen.clock.settle()
+  const turn = (id: string) => $.turn.complete({ turnId: id, answer: '', durationMs: 1, isAborted: false, reason: 'end_turn' } as never)
+
+  // A first turn sets the fresh start; the conversation then grows.
+  seen.setTokens(30_000)
+  await turn('t1')
+  await seen.clock.advance(15_000)
+  seen.setTokens(90_000)
+  await seen.clock.advance(ROTATE_IDLE_MS - 30 * 1000)
+  expect(seen.prompts).not.toContain(ROTATE_PROMPT)
+  await seen.clock.advance(60_000)
+  expect(seen.prompts.at(-1)).toBe(ROTATE_PROMPT)
+
+  // The handoff turn ends with a new handoff on disk: clear, then resume from it.
+  seen.addFile('.companion/handoff-2026-11-05-1200.md', 'new')
+  await turn('t2')
+  await seen.clock.advance(15_000)
+  expect(commands).toEqual(['clear'])
+  expect(seen.prompts.at(-1)).toContain('Read .companion/handoff-2026-11-05-1200.md')
+
+  // Once the resume turn ends, the rotation is over and does not repeat on a fresh conversation.
+  await turn('t3')
+  seen.setTokens(35_000)
+  await seen.clock.advance(ROTATE_IDLE_MS + 60_000)
+  expect(seen.prompts.filter(text => text === ROTATE_PROMPT)).toHaveLength(1)
+})
+
+test('a handoff turn that wrote no handoff gives the rotation up without clearing', async ($, on) => {
+  mock.env(on, { WATCHMEN: '1' })
+  const commands: string[] = []
+  on('command.run', { command: 'clear' }, ($$, e) => (commands.push(e.command), { text: '' }) as never)
+  on('turn.complete', () => ({ text: '' }))
+  const seen = engine(on, { '.companion/board.json': BAND_BOARD }, 30)
+  await $.session.start(START)
+  await seen.clock.settle()
+  const turn = (id: string) => $.turn.complete({ turnId: id, answer: '', durationMs: 1, isAborted: false, reason: 'end_turn' } as never)
+  seen.setTokens(30_000)
+  await turn('t1')
+  await seen.clock.advance(15_000)
+  seen.setTokens(90_000)
+  await seen.clock.advance(ROTATE_IDLE_MS + 30_000)
+  expect(seen.prompts.at(-1)).toBe(ROTATE_PROMPT)
+  await turn('t2')
+  await seen.clock.advance(15_000)
+  expect(commands).toEqual([])
+  expect(seen.logs.some(line => line.includes('did not rotate'))).toBe(true)
 })
