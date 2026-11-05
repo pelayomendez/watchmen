@@ -69,13 +69,13 @@ The model's tools are `board_track`, `board_move`, `board_drop` and `board_chang
 
 ## What you see
 
-- **The band**: one slim row above the prompt in the watch session: the mascot, the lane counts (needs you in red, moving in cyan, waiting dim), and two buttons, `board` (opens the board pane; Escape closes it) and `hide` (hidden for the rest of the session). It shortens its words, then drops the buttons and the other counts, as the terminal narrows.
+- **The band**: one slim row above the prompt in the watch session: the mascot, the lane counts (needs you in red, moving in cyan, waiting dim), and two buttons, `board` (opens the board pane; Escape closes it) and `hide` (hidden until `/watchmen band` or the next session). It shortens its words, then drops the buttons and the other counts, as the terminal narrows.
 - **The mascot**: a hydrogen atom, one nucleus, one orbit, one electron (`assets/atom.svg`, drawn for this project), coloured by state: blue when calm, the electron amber when something changed, red when something needs you. Surfaces that draw SVG (the desktop app, the editor) show the picture; a terminal has no SVG element, so there it is the `⚛` glyph in the state's colour.
 
 - **The pane**, `⚛ watchmen`: the lanes with their items, changed ones marked ◆ and bold. It opens by itself beside the transcript in the fullscreen layout; on the main screen, `/watchmen` opens it.
 - **The status line**: `⚛ watchmen · 2 need you · 1 moving · 1 changed · 42% · 3h07`. At 75% context it asks for a handoff before the window fills.
 - **Toasts**: one when an item changes, one when the watch runs long.
-- **`/watchmen`** opens the pane and prints the board; `/watchmen brief` prints it grouped by lane; `/watchmen track <title>` adds a todo to needs-you; `/watchmen approve <id> <hash>` lets an item's check run; `/watchmen reload` and `/watchmen reset` recover from an unreadable board.json.
+- **`/watchmen`** opens the pane and prints the board; `/watchmen brief` prints it grouped by lane; `/watchmen band` shows a hidden band again; `/watchmen track <title>` adds a todo to needs-you; `/watchmen approve <id> <hash>` lets an item's check run; `/watchmen reload` and `/watchmen reset` recover from an unreadable board.json.
 
 ## The board outside Claude
 

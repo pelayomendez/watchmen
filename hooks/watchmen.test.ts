@@ -680,7 +680,7 @@ function BAND_TEXT_FITS(drawn: string, columns: number): boolean {
   return texts.join('').length <= columns
 }
 
-test('hide hides the band for the session, and it stays hidden', async ($, on) => {
+test('hide hides the band until /watchmen band brings it back', async ($, on) => {
   mock.env(on, { WATCHMEN: '1' })
   const seen = engine(on, { '.companion/board.json': BAND_BOARD }, 10)
   await $.session.start(START)
@@ -689,6 +689,9 @@ test('hide hides the band for the session, and it stays hidden', async ($, on) =
   await band.press({ key: 'hide' })
   const again = JSON.stringify(await (await mountBand($, 100)).drawn())
   expect(again).not.toContain('need you')
+  await $.command.run(typed('band'))
+  const back = JSON.stringify(await (await mountBand($, 100)).drawn())
+  expect(back).toContain('need you')
 })
 
 test('inside herdr the sidebar tokens go out styled by state: set the live one, clear the others', async ($, on) => {

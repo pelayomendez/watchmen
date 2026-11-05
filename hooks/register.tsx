@@ -407,8 +407,8 @@ export const register: Register = on => {
 
     await $.command.register({
       name: 'watchmen',
-      description: 'The watch: open the board, or track <title> | brief | approve <id> <hash> | reload | reset',
-      argumentHint: '[track <title> | brief | approve <id> <hash> | reload | reset]',
+      description: 'The watch: open the board, or track <title> | brief | band | approve <id> <hash> | reload | reset',
+      argumentHint: '[track <title> | brief | band | approve <id> <hash> | reload | reset]',
     })
     await $.tool.register({
       name: 'board_track',
@@ -518,6 +518,10 @@ export const register: Register = on => {
       await setAwaiting($, item.id, undefined)
       await save($)
       return { text: `Approved for this workspace: ${JSON.stringify(item.check.argv)}` }
+    }
+    if (verb === 'band') {
+      await patchWatch($, held => ({ ...held, isBandHidden: false }))
+      return { text: 'The band is back above the prompt.' }
     }
     if (verb === 'reload' || verb === 'reset') {
       const boardError = verb === 'reload' ? await loadBoard($) : undefined
