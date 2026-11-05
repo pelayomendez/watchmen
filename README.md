@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/icon.png" width="160" alt=""></p>
+
 # watchmen
 
 > *Quis custodiet ipsos custodes?* Who watches the watchmen? Here: you do, through the charter.
