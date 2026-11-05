@@ -88,11 +88,13 @@ async function sha256(text: string): Promise<string> {
  * execution, and a board.json or a board_track call can come from anyone who can write to the repo
  * or the conversation, so no check runs until the human approves its exact argv here.
  */
-// The band's brief button prints the brief as a transcript row of its own. It cannot go through
-// /watchmen brief: $.command.run from a plugin skips that plugin's own command.run hook, so the
-// command would find no one to answer it.
-function showBrief($: EngineInterface, items: readonly Item[]): void {
-  $.ui.log(summary(items))
+// The band's board button opens the board pane: lanes and items laid out, closed with Escape. A
+// press counts as the person asking, so the pane is placed at any width; should it still not be,
+// the brief goes into the transcript instead. (It cannot run /watchmen: $.command.run from a
+// plugin skips that plugin's own command.run hook, so nothing would answer.)
+async function showBoard($: EngineInterface, items: readonly Item[]): Promise<void> {
+  const opened = await $.ui.open({ id: PANE, title: PANE_TITLE, closeOnEscape: true }).catch(() => undefined)
+  if (!opened?.isPlaced) $.ui.log(summary(items))
 }
 
 async function commandHash($: EngineInterface, argv: readonly string[]): Promise<string> {
@@ -543,7 +545,7 @@ export const register: Register = on => {
   // The board opens by itself only where it docks beside the transcript (the fullscreen layout);
   // on the main screen it would push the conversation around, so there it waits for /watchmen.
   // The band: one slim row above the prompt in the watch session, the mascot and the lane counts,
-  // with brief and hide. It also opens the board pane by itself where it docks beside the transcript
+  // with board and hide. It also opens the board pane by itself where it docks beside the transcript
   // (the fullscreen layout); on the main screen the pane waits for /watchmen.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const watch = (await $.state.get(WATCH)).value
@@ -575,7 +577,7 @@ export const register: Register = on => {
         {hasButtons && (
           <Box key="actions" flexDirection="row">
             <Text>  </Text>
-            <Button key="brief" label="brief" onPress={() => void showBrief($, items)} />
+            <Button key="board" label="board" onPress={() => void showBoard($, items)} />
             <Text> </Text>
             <Button key="hide" label="hide" onPress={() => patchWatch($, held => ({ ...held, isBandHidden: true }))} />
           </Box>

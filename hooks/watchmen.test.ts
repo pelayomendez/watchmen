@@ -175,7 +175,8 @@ function engine(on: On, files: Record<string, string>, percent: number) {
   const toasts: string[] = []
   on('ui.status', ($, e) => (status.push(e.text), { value: undefined }))
   on('ui.toast', ($, e) => (toasts.push(e.text), { value: undefined }))
-  on('ui.open', () => ({ value: { isPlaced: true as const } }))
+  const opened: string[] = []
+  on('ui.open', ($, e) => (opened.push(e.id), { value: { isPlaced: true as const } }))
   // The engine's own band beneath the plugins: nothing drawn.
   on('ui.render', { component: 'AbovePrompt' }, ($, e) => h($.ui.resolve(e).Box, {}) as never)
   let draft = ''
@@ -230,6 +231,7 @@ function engine(on: On, files: Record<string, string>, percent: number) {
     prompts,
     notices,
     logs,
+    opened,
     holdNextSave: () => {
       let release = () => {}
       writeGate = new Promise(resolve => (release = resolve))
@@ -664,12 +666,12 @@ test('the band fits its columns: words and buttons when wide, a short count when
   await seen.clock.settle()
 
   const wide = JSON.stringify(await (await mountBand($, 100)).drawn())
-  for (const text of ['⚛', '1 need you', '· 1 moving', '· 2 waiting', '"label":"brief"', '"label":"hide"', '#E5484D', 'cyan']) expect(wide).toContain(text)
+  for (const text of ['⚛', '1 need you', '· 1 moving', '· 2 waiting', '"label":"board"', '"label":"hide"', '#E5484D', 'cyan']) expect(wide).toContain(text)
 
   const narrow = JSON.stringify(await (await mountBand($, 30)).drawn())
   expect(narrow).toContain('1 need')
   expect(narrow).not.toContain('moving')
-  expect(narrow).not.toContain('"label":"brief"')
+  expect(narrow).not.toContain('"label":"board"')
   expect(BAND_TEXT_FITS(narrow, 30)).toBe(true)
 })
 
@@ -702,15 +704,14 @@ test('inside herdr the sidebar tokens go out styled by state: set the live one, 
   ])
 })
 
-test('the band brief button prints the brief into the transcript', async ($, on) => {
+test('the band board button opens the board pane', async ($, on) => {
   mock.env(on, { WATCHMEN: '1' })
   const seen = engine(on, { '.companion/board.json': BAND_BOARD }, 10)
   await $.session.start(START)
   await seen.clock.settle()
   const band = await mountBand($, 100)
-  await band.press({ key: 'brief' })
+  await band.press({ key: 'board' })
   await seen.clock.settle()
-  const brief = seen.logs.find(line => line.includes('{n}'))
-  expect(brief).toBeDefined()
-  for (const id of ['{m}', '{w1}', '{w2}']) expect(brief).toContain(id)
+  expect(seen.opened).toContain('board')
+  expect(seen.logs.some(line => line.includes('{n}'))).toBe(false)
 })
