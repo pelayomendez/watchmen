@@ -73,7 +73,8 @@ The model's tools are `board_track`, `board_move`, `board_drop` and `board_chang
 - **The mascot**: a hydrogen atom, one nucleus, one orbit, one electron (`assets/atom.svg`, drawn for this project), coloured by state: blue when calm, the electron amber when something changed, red when something needs you. Surfaces that draw SVG (the desktop app, the editor) show the picture; a terminal has no SVG element, so there it is the `⚛` glyph in the state's colour.
 
 - **The pane**, `⚛ watchmen`: the lanes with their items, changed ones marked ◆ and bold. It opens by itself beside the transcript in the fullscreen layout; on the main screen, `/watchmen` opens it.
-- **The status line**: `⚛ watchmen · 2 need you · 1 moving · 1 changed · 42% · 3h07`. At 75% context it asks for a handoff before the window fills.
+- **The watch's own figures**, dim at the end of the band: `42% · idle 12m`, its context fill and how long since its last turn. At 75% they turn into `write the handoff`.
+- **Rotation.** The prompt cache lasts an hour; a wake after that pays to cache the whole conversation again. So when the watch has been idle 50 minutes and its conversation has grown 40k tokens past its fresh start, it writes its handoff, the conversation is cleared, and it resumes from that handoff: the next wake finds a small conversation. A turn that wrote no handoff, or a refused clear, leaves the watch as it was.
 - **Toasts**: one when an item changes, one when the watch runs long.
 - **`/watchmen`** opens the pane and prints the board; `/watchmen brief` prints it grouped by lane; `/watchmen band` shows a hidden band again; `/watchmen track <title>` adds a todo to needs-you; `/watchmen approve <id> <hash>` lets an item's check run; `/watchmen reload` and `/watchmen reset` recover from an unreadable board.json.
 
@@ -148,7 +149,7 @@ A secondary action, `watchmen.toggle-board`, opens the read-only board list in a
 | `bin/watchmen` | Launcher: finds the skill and the newest handoff, builds the briefing, starts the session |
 | `prompts/persona.md` | Who the watch is, and how it triages the board |
 | `hooks/board.ts` | The board's rules: tracking, checks, change detection, lanes |
-| `hooks/register.tsx` | Wiring: state, timer, checks, tools, `/watchmen`, the pane, the status line |
+| `hooks/register.tsx` | Wiring: state, timer, checks, tools, `/watchmen`, the pane, the band, rotation |
 | `hooks/watchmen.test.ts` | `claude plugin test .` |
 | `bin/watchmen-board`, `bin/board-render.mjs` | The read-only board viewer and its pure rendering |
 | `herdr-plugin.toml`, `scripts/herdr-*` | The herdr plugin: summon the session, toggle the board list |

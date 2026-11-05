@@ -156,18 +156,55 @@ export function counts(items: readonly Item[]): Record<Lane, number> {
   return tally
 }
 
-export function statusLine(items: readonly Item[], percent: number | undefined, elapsedMs: number, handoffAt: number): string {
-  const hours = Math.floor(elapsedMs / 3_600_000)
-  const minutes = Math.floor((elapsedMs % 3_600_000) / 60_000)
-  const parts = ['⚛ watchmen']
-  const tally = counts(items)
-  const changed = items.filter(one => one.isChanged).length
-  if (tally['needs-you']) parts.push(`${tally['needs-you']} need you`)
-  if (tally.moving) parts.push(`${tally.moving} moving`)
-  if (changed) parts.push(`${changed} changed`)
-  if (percent !== undefined) parts.push(`${percent}%`)
-  parts.push(percent !== undefined && percent >= handoffAt ? 'write the handoff' : `${hours}h${String(minutes).padStart(2, '0')}`)
-  return parts.join(' · ')
+/**
+ * The watch's own figures for the band: how full its context is and how long it has been idle,
+ * or, past handoffAt, the reminder to write the handoff.
+ */
+export function vitals(percent: number | undefined, idleMs: number | undefined, handoffAt: number): BandPart[] {
+  if (percent !== undefined && percent >= handoffAt) return [{ text: `${percent}% · write the handoff`, color: MASCOT_COLORS.changed, bold: true }]
+  const parts: BandPart[] = []
+  if (percent !== undefined) parts.push({ text: `${percent}%`, dim: true })
+  if (idleMs !== undefined && idleMs >= 60_000) parts.push({ text: `idle ${duration(idleMs)}`, dim: true })
+  return parts
+}
+
+function duration(ms: number): string {
+  const minutes = Math.floor(ms / 60_000)
+  return minutes >= 60 ? `${Math.floor(minutes / 60)}h${String(minutes % 60).padStart(2, '0')}` : `${minutes}m`
+}
+
+/** Idle this long, the watch rotates before its prompt cache (an hour) goes cold. */
+export const ROTATE_IDLE_MS = 50 * 60_000
+/** Rotate only once the conversation has grown this far past where it started. */
+export const ROTATE_GROWTH_TOKENS = 40_000
+
+/**
+ * Whether the watch should rotate now: write its handoff and start over on a cleared conversation.
+ * An idle watch's cache goes cold within the hour, and its next wake then pays to cache the whole
+ * conversation again; rotating first means that wake finds a small one. Only when the
+ * conversation has grown well past a fresh start, and never over a turn or the person typing.
+ */
+export function isRotationDue(input: {
+  now: number
+  lastTurnAt?: number
+  tokens?: number
+  baseTokens?: number
+  isTurnRunning: boolean
+  draft: string
+}): boolean {
+  const { now, lastTurnAt, tokens, baseTokens, isTurnRunning, draft } = input
+  if (isTurnRunning || draft.trim() !== '') return false
+  if (lastTurnAt === undefined || tokens === undefined || baseTokens === undefined) return false
+  return now - lastTurnAt >= ROTATE_IDLE_MS && tokens - baseTokens >= ROTATE_GROWTH_TOKENS
+}
+
+/** The prompt that asks the watch for its handoff before a rotation. Constant: no board text. */
+export const ROTATE_PROMPT =
+  '◆ rotate — the watch has been idle and its conversation is long. Write the handoff now, as your skill describes, to .companion/handoff-<YYYY-MM-DD-HHMM>.md. Do not triage or speak to the human; end the turn once the file is written.'
+
+/** The prompt that starts the watch again on a cleared conversation, from the handoff it wrote. */
+export function resumePrompt(handoff: string): string {
+  return `◆ resumed — the conversation was cleared to keep the watch light. Read ${handoff}, then call board_changes and triage. Speak only if something needs the human.`
 }
 
 /** Removes control characters and DEL, so text from a board.json cannot drive the terminal. */
@@ -353,7 +390,7 @@ export type BandPart = { text: string; color?: string; bold?: boolean; dim?: boo
  * The band's counts, fitted to the columns it has: full words when wide, short words when not,
  * and the mascot alone at the narrowest. Answers whether the buttons fit too.
  */
-export function bandLayout(items: readonly Item[], columns: number): { parts: BandPart[]; hasButtons: boolean } {
+export function bandLayout(items: readonly Item[], columns: number, extra: readonly BandPart[] = []): { parts: BandPart[]; hasButtons: boolean } {
   const tally = counts(items)
   const state = mascotState(items)
   const mascot: BandPart = { text: '⚛', color: MASCOT_COLORS[state], bold: state === 'needs-you' }
@@ -368,6 +405,7 @@ export function bandLayout(items: readonly Item[], columns: number): { parts: Ba
   const line = (parts: BandPart[]) => parts.map(one => one.text).join(' · ').length + 2
   const hasButtons = columns >= 44
   const room = columns - (hasButtons ? 18 : 0)
+  if (extra.length > 0 && line([...counted, ...extra]) <= room) return { parts: [mascot, ...counted, ...extra], hasButtons }
   if (line(counted) <= room) return { parts: [mascot, ...counted], hasButtons }
   if (columns >= 12) return { parts: [mascot, counted[0]!], hasButtons: false }
   return { parts: [mascot], hasButtons: false }

@@ -11,7 +11,16 @@ export type Watch = {
   wake?: { pending: string[]; lastWakeAt?: number }
   /** The band above the prompt was hidden for this session. */
   isBandHidden?: boolean
+  /** When the main conversation's last turn ended: how long the watch has been idle. */
+  lastTurnAt?: number
+  /** The context's size in tokens after the first turn of this conversation: a fresh start. */
+  baseTokens?: number
+  /** A rotation under way: the handoff asked for (before: the newest handoff then), or the resume sent. */
+  rotation?: { phase: 'handoff' | 'resume'; since: number; before?: string }
 }
+
+/** What the band shows of the watch itself: its context fill and how long it has been idle. */
+export type Vitals = { percent?: number; idleMs?: number }
 
 /** Where an item stands for the human: what needs them, what moves on its own, what waits on others. */
 export type Lane = 'needs-you' | 'moving' | 'waiting' | 'done'
@@ -51,6 +60,6 @@ export type Item = {
 
 declare module 'claude-code' {
   interface PluginState {
-    watchmen: { watch: Watch; board: Item[] }
+    watchmen: { watch: Watch; board: Item[]; vitals: Vitals }
   }
 }
