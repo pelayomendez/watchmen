@@ -35,6 +35,8 @@ The launcher starts a session named `watchmen`, briefs it with the persona, the 
 
 `WATCHMEN_PRINT_BRIEFING=1 watchmen` prints the briefing without starting a session.
 
+**Models.** The watch stays on all day, so it runs on `sonnet`; a task you ask it to perform goes to a subagent on `opus`, and only that subagent costs the stronger model. `WATCHMEN_MODEL` and `WATCHMEN_TASK_MODEL` (`haiku`, `sonnet`, `opus`, `fable`) change them.
+
 ## The board
 
 Items are deliberately loose. An item is a title in a lane, with an optional free `kind` label, note, link, and **check**: any host command whose output tells the item's state. watchmen knows nothing about Jira or GitLab; the check does.
