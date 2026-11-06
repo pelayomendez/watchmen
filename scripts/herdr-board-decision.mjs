@@ -12,7 +12,7 @@ function isBoard(pane) {
   if (pane.label === BOARD_TITLE || pane.title === BOARD_TITLE) return true
   const plugin = pane.plugin_id ?? pane.plugin?.id ?? pane.plugin
   const entrypoint = pane.entrypoint ?? pane.plugin_entrypoint ?? pane.plugin?.entrypoint
-  return plugin === 'watchmen' && (entrypoint === undefined || entrypoint === 'board')
+  return (plugin === 'pelayomendez.watchmen' || plugin === 'watchmen') && (entrypoint === undefined || entrypoint === 'board')
 }
 
 export function decide(json) {

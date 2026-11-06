@@ -1,4 +1,8 @@
+<p align="center"><img src="assets/icon.png" width="160" alt=""></p>
+
 # watchmen
+
+[Website](https://pelayomendez.github.io/watchmen/) · [Changelog](CHANGELOG.md)
 
 > *Quis custodiet ipsos custodes?* Who watches the watchmen? Here: you do, through the charter.
 
@@ -6,18 +10,26 @@ An assistant session that runs beside your working sessions and keeps track of e
 
 ```
  your work sessions                    watchmen (always open, beside them)
- ┌─ NRV-11249 ─────────┐               ┌─ ⚛ watchmen ──────────────────────────┐
+ ┌─ APP-11249 ─────────┐               ┌─ ⚛ watchmen ──────────────────────────┐
  │ implementing…       │               │ Needs you (2)                          │
  └─────────────────────┘               │   ◆ [mr] !412 frames — 2 new comments  │
- ┌─ NRV-12513 ─────────┐               │   • [todo] Review deck v3              │
+ ┌─ APP-12513 ─────────┐               │   • [todo] Review deck v3              │
  │ waiting on backend  │               │ Moving (1)                             │
- └─────────────────────┘               │   • [session] NRV-11249 — slice 2/4    │
+ └─────────────────────┘               │   • [session] APP-11249 — slice 2/4    │
      Jira · GitLab · handoffs ───────▶ │ Waiting (1)                            │
-                                       │   • [jira] NRV-11560 — backend fields  │
+                                       │   • [jira] APP-11560 — backend fields  │
                                        └────────────────────────────────────────┘
 ```
 
 It runs the [`ambient-companion`](https://github.com/pelayomendez/pelayo-skills/tree/main/skills/productivity/ambient-companion) process under a charter of what it may do alone, must ask first, and never does. It never writes product code and never acts in your other sessions; it watches, sorts, and asks.
+
+## Requirements
+
+- [Claude Code](https://code.claude.com) 2.1.287 or newer (plugin hooks modules)
+- Node.js 20 or newer, and bash
+- The [`ambient-companion`](https://github.com/pelayomendez/pelayo-skills) skill: `npx skills@latest add pelayomendez/pelayo-skills`
+- Optional: [herdr](https://herdr.dev) 0.9 or newer (0.9.5 recommended) for summon, follow and the sidebar token; macOS or Linux
+- Optional: whatever CLIs your checks call (`acli`, `glab`, `gh`…)
 
 ## Use it
 
@@ -29,7 +41,12 @@ cd <your workspace>
 watchmen
 ```
 
-Or install the plugin alone with `/plugin install watchmen --marketplace pelayomendez/watchmen`; the launcher is still what starts the watch.
+Or install the plugin from this repository as a marketplace; the launcher is still what starts the watch:
+
+```
+/plugin marketplace add pelayomendez/watchmen
+/plugin install watchmen@pelayomendez-watchmen
+```
 
 The launcher starts a session named `watchmen`, briefs it with the persona, the newest `.companion/handoff-*.md` and where the skill lives, and loads this plugin. The plugin stays silent in every session the launcher did not start, so it is safe to install globally.
 
@@ -52,11 +69,11 @@ Items are deliberately loose. An item is a title in a lane, with an optional fre
 
 Every 15 seconds the plugin runs the checks that are due (each on its own interval: 5 minutes by default, never under 1 minute, never two at once). The first output is the baseline. When a later output differs, the item is marked changed (◆), a toast says so, and the watch calls `board_changes` and triages: it moves the item to its lane with a one-line note. A failing check shows `⚠ check failed` beside the item and leaves its note alone. A change is detected on the whole output; only its first 2,000 characters are kept for display.
 
-Tell the watch what to track in plain words ("keep an eye on NRV-123 and MR 42"), and it adds items with `board_track`. Check recipes:
+Tell the watch what to track in plain words ("keep an eye on APP-123 and MR 42"), and it adds items with `board_track`. Check recipes:
 
 | Track | Check (`argv`) |
 |---|---|
-| A Jira ticket's status | `["acli", "jira", "workitem", "view", "NRV-123", "--fields", "status"]` |
+| A Jira ticket's status | `["acli", "jira", "workitem", "view", "APP-123", "--fields", "status"]` |
 | A GitLab MR's state and approvals | `["sh", "-c", "glab mr view 42 -F json \| jq -r '[.state, .detailed_merge_status] \| join(\" \")'"]` |
 | A GitHub PR | `["gh", "pr", "view", "7", "--json", "state,reviewDecision", "-q", ".state + \" \" + .reviewDecision"]` |
 | Another session, by its handoff | `["sh", "-c", "tail -1 ../other-repo/.companion/handoff-*.md"]` |
@@ -88,10 +105,10 @@ It finds the board in this order: a path given as an argument; `WATCHMEN_BOARD`;
 
 The repo is also a [herdr](https://herdr.dev) plugin (macOS and Linux, herdr 0.9 or later). Its main action, `summon`, brings the watchmen session itself beside you, from whatever tab you are on: the companion follows you between your session tabs.
 
-Install it from GitHub, or link a clone:
+Install it from GitHub (pin a release with `--ref`), or link a clone. The install checks that node and claude are there and installs nothing:
 
 ```bash
-herdr plugin install pelayomendez/watchmen
+herdr plugin install pelayomendez/watchmen --ref v0.2.0
 herdr plugin link ~/path/to/watchmen
 ```
 
@@ -101,7 +118,7 @@ Bind a key in `~/.config/herdr/config.toml`:
 [[keys.command]]
 key = "prefix+m"
 type = "plugin_action"
-command = "watchmen.summon"
+command = "pelayomendez.watchmen.summon"
 description = "summon the watch"
 ```
 
@@ -140,7 +157,7 @@ For colour, use the three state tokens instead: only the one for the current sta
 rows = [["state_icon", "workspace"], ["branch", "git_status"], [{ token = "$watchmen_alert", fg = "#E5484D", bold = true }, { token = "$watchmen_changed", fg = "#F5A524" }, { token = "$watchmen_quiet", dim = true }]]
 ```
 
-A secondary action, `watchmen.toggle-board`, opens the read-only board list in a split instead; bind it too if you want the list without the conversation. Without the plugin, run `watchmen board` in a pane of its own.
+A secondary action, `pelayomendez.watchmen.toggle-board`, opens the read-only board list in a split instead; bind it too if you want the list without the conversation. Without the plugin, run `watchmen board` in a pane of its own.
 
 ## Layout
 
@@ -152,10 +169,26 @@ A secondary action, `watchmen.toggle-board`, opens the read-only board list in a
 | `hooks/register.tsx` | Wiring: state, timer, checks, tools, `/watchmen`, the pane, the band, rotation |
 | `hooks/watchmen.test.ts` | `claude plugin test .` |
 | `bin/watchmen-board`, `bin/board-render.mjs` | The read-only board viewer and its pure rendering |
-| `herdr-plugin.toml`, `scripts/herdr-*` | The herdr plugin: summon the session, toggle the board list |
+| `herdr-plugin.toml`, `scripts/herdr-*` | The herdr plugin: install check, summon the session, toggle the board list |
 | `test/*.test.mjs` | `node --test test/*.test.mjs` |
 
 Why the persona is in the launcher and not the plugin: Claude Code's built-in security plugin bypasses a user-installed plugin's changes to the system prompt, so the launcher passes it with `--append-system-prompt`.
+
+## Update and uninstall
+
+- Claude Code: `/plugin update watchmen@pelayomendez-watchmen`; `/plugin uninstall watchmen@pelayomendez-watchmen`.
+- herdr: `herdr plugin update pelayomendez.watchmen`; `herdr plugin uninstall pelayomendez.watchmen`, then remove its key binding.
+- The launcher: remove the `~/.local/bin/watchmen` link. The watch's state is in `${XDG_STATE_HOME:-~/.local/state}/watchmen` and each workspace's `.companion/`.
+
+## Develop
+
+```bash
+claude plugin validate --strict .
+claude plugin test .
+node --test test/*.test.mjs
+```
+
+CI runs all three on every pull request. To release: bump `version` in both `.claude-plugin/plugin.json` and `herdr-plugin.toml`, move the Unreleased notes in `CHANGELOG.md` under it, merge, then on main `claude plugin tag --push` (tag `watchmen--v<version>`) and `git tag v<version> && git push origin v<version>` for herdr's `--ref`.
 
 ## Next
 
