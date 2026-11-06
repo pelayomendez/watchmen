@@ -21,6 +21,7 @@ test('focuses an open board, and closes it when it is the focused pane', () => {
   assert.equal(decide(list(pane('w1:p1', { focused: true }), pane('w1:p2', { label: '⚛ watchmen' }))), 'FOCUS w1:p2')
   assert.equal(decide(list(pane('w1:p1'), pane('w1:p2', { label: '⚛ watchmen', focused: true }))), 'CLOSE w1:p2')
   assert.equal(decide(list(pane('w1:p1', { focused: true }), pane('w1:p2', { plugin_id: 'watchmen', entrypoint: 'board' }))), 'FOCUS w1:p2')
+  assert.equal(decide(list(pane('w1:p1', { focused: true }), pane('w1:p2', { plugin_id: 'pelayomendez.watchmen', entrypoint: 'board' }))), 'FOCUS w1:p2')
 })
 
 test('anything unreadable or unsafe opens instead of acting on a pane id', () => {

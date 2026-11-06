@@ -1,12 +1,18 @@
 # watchmen as a herdr plugin: the watchmen session summoned beside whatever tab you are on, and
 # the read-only board list as a secondary split. No build step: the viewer is a Node script with no dependencies.
 
-id = "watchmen"
+id = "pelayomendez.watchmen"
 name = "watchmen"
 version = "0.2.0"
 description = "The watch board: what needs you, what is moving, what is waiting, beside your sessions."
 min_herdr_version = "0.9.0"
 platforms = ["linux", "macos"]
+
+# Checks at install that node and the claude CLI are there, and says where the skill comes from.
+# It installs nothing.
+[[build]]
+platforms = ["linux", "macos"]
+command = ["bash", "scripts/herdr-preflight.sh"]
 
 [[panes]]
 id = "board"

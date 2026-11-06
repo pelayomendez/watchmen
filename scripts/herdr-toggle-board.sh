@@ -36,7 +36,7 @@ case "$decision" in
 esac
 
 exec "$herdr_bin" plugin pane open \
-  --plugin watchmen \
+  --plugin pelayomendez.watchmen \
   --entrypoint board \
   --placement split \
   --direction right \
