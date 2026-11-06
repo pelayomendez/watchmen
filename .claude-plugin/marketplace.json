@@ -1,5 +1,17 @@
 {
-  "name": "watchmen",
-  "owner": { "name": "Pelayo Méndez", "url": "https://github.com/pelayomendez" },
-  "plugins": [{ "name": "watchmen", "source": "./" }]
+  "name": "pelayomendez-watchmen",
+  "description": "watchmen: a companion Claude Code session that keeps a board of your tickets, MRs and sessions.",
+  "owner": {
+    "name": "Pelayo Méndez",
+    "url": "https://github.com/pelayomendez"
+  },
+  "plugins": [
+    {
+      "name": "watchmen",
+      "source": "./",
+      "description": "A companion session that keeps a board of what you track and brings you only what needs you",
+      "homepage": "https://pelayomendez.github.io/watchmen/",
+      "category": "productivity"
+    }
+  ]
 }

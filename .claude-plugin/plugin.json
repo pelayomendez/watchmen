@@ -1,11 +1,24 @@
 {
   "name": "watchmen",
-  "version": "0.1.0",
-  "description": "A long-lived companion session: a calm observer that keeps the watch over your work across sessions and brings you only the decisions.",
+  "version": "0.2.0",
+  "description": "A companion session beside your working ones: it keeps a board of everything you track (tickets, MRs, other sessions, todos) and brings you only what needs you.",
   "author": {
     "name": "Pelayo Méndez",
     "url": "https://github.com/pelayomendez"
   },
+  "homepage": "https://pelayomendez.github.io/watchmen/",
+  "repository": "https://github.com/pelayomendez/watchmen",
   "license": "MIT",
+  "keywords": [
+    "companion",
+    "board",
+    "attention",
+    "tickets",
+    "merge-requests",
+    "sessions",
+    "herdr",
+    "ambient"
+  ],
+  "icon": "./.claude-plugin/icon.png",
   "types": "./types/index.d.ts"
 }
