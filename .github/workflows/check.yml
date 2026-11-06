@@ -1,0 +1,25 @@
+name: check
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  plugin:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code
+      - name: Validate
+        run: claude plugin validate --strict .
+      - name: Test
+        run: claude plugin test .
+      - name: Node tests
+        run: node --test test/*.test.mjs
+      - name: Shell syntax
+        run: for f in bin/watchmen scripts/*.sh; do bash -n "$f"; done

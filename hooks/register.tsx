@@ -67,7 +67,7 @@ export function newestHandoff(names: readonly string[]): string | undefined {
 
 
 const ITEM_PROPERTIES = {
-  id: { type: 'string', description: 'Stable id, e.g. NRV-123 or mr-42. Defaults to a slug of the title.' },
+  id: { type: 'string', description: 'Stable id, e.g. APP-123 or mr-42. Defaults to a slug of the title.' },
   title: { type: 'string', description: 'What the item is, in a few words.' },
   lane: { type: 'string', enum: LANES, description: 'needs-you, moving, waiting or done.' },
   kind: { type: 'string', description: 'A free label: jira, mr, session, todo, anything.' },
