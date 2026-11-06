@@ -4,7 +4,7 @@ import { test } from 'node:test'
 import { ago, clean, fit, readBoard, render, wantsColor } from '../bin/board-render.mjs'
 
 const NOW = Date.parse('2026-10-15T12:00:00')
-const OPTIONS = { columns: 80, now: NOW, color: false, workspace: 'orbit-desk' }
+const OPTIONS = { columns: 80, now: NOW, color: false, workspace: 'my-project' }
 
 const BOARD = JSON.stringify({
   version: 1,
@@ -22,7 +22,7 @@ const show = (state, options = {}) => render(state, { ...OPTIONS, ...options })
 
 test('groups items into NEEDS YOU, MOVING, WAITING, with DONE as a count', () => {
   const lines = show(readBoard(BOARD, NOW))
-  assert.match(lines[0], /^⚛ watchmen · orbit-desk · updated \d\d:\d\d:\d\d$/)
+  assert.match(lines[0], /^⚛ watchmen · my-project · updated \d\d:\d\d:\d\d$/)
   assert.deepEqual(lines.slice(2), [
     'NEEDS YOU (1)',
     '  ◆ [mr] !123 frames — 2 new comments · 5m ago',
@@ -50,7 +50,7 @@ test('fits every line to a narrow terminal with an ellipsis', () => {
 })
 
 test('a missing board says how to start one', () => {
-  assert.deepEqual(show(readBoard(undefined, 0)), ['⚛ watchmen · orbit-desk', '', 'no board yet — start `watchmen` in this folder'])
+  assert.deepEqual(show(readBoard(undefined, 0)), ['⚛ watchmen · my-project', '', 'no board yet — start `watchmen` in this folder'])
 })
 
 test('a corrupt board says so and keeps the last good board below', () => {
@@ -128,7 +128,7 @@ test('finds the board: argument, WATCHMEN_BOARD, the herdr pane, the cwd unless 
 })
 
 test('the header says (stale) when the watch the pointer named is not running', () => {
-  assert.equal(show(readBoard(BOARD, NOW), { isStale: true })[0].includes('orbit-desk (stale) · updated'), true)
+  assert.equal(show(readBoard(BOARD, NOW), { isStale: true })[0].includes('my-project (stale) · updated'), true)
   assert.equal(show(readBoard(BOARD, NOW))[0].includes('(stale)'), false)
 })
 

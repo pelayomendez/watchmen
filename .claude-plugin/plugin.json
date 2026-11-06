@@ -6,6 +6,19 @@
     "name": "Pelayo Méndez",
     "url": "https://github.com/pelayomendez"
   },
+  "homepage": "https://pelayomendez.github.io/watchmen/",
+  "repository": "https://github.com/pelayomendez/watchmen",
   "license": "MIT",
+  "keywords": [
+    "companion",
+    "board",
+    "attention",
+    "tickets",
+    "merge-requests",
+    "sessions",
+    "herdr",
+    "ambient"
+  ],
+  "icon": "./.claude-plugin/icon.png",
   "types": "./types/index.d.ts"
 }
