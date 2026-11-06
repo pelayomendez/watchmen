@@ -3,6 +3,8 @@
 # work in the current directory. Other sessions reach it as "watchmen".
 #
 # Usage: watchmen [first prompt]   (default: "Begin the watch.")
+#        watchmen board [path]     the read-only board viewer (bin/watchmen-board)
+#        watchmen board [path]       the read-only board viewer
 
 set -euo pipefail
 
@@ -13,6 +15,12 @@ while [ -L "$self" ]; do
   case "$target" in /*) self="$target" ;; *) self="$(dirname "$self")/$target" ;; esac
 done
 ROOT="$(cd "$(dirname "$self")/.." && pwd)"
+
+# `watchmen board [path]`: the read-only board viewer, for a pane or tab of its own.
+if [ "${1:-}" = "board" ]; then
+  shift
+  exec node "$ROOT/bin/watchmen-board" "$@"
+fi
 
 # The ambient-companion skill is the watch's process. Look where its install routes put it;
 # WATCHMEN_SKILL points anywhere else.
@@ -48,9 +56,19 @@ if [ -n "$handoff" ]; then
 else
   handoff_line="There is no handoff in .companion/ yet. Start by asking the human for the work, its sources and the charter, one at a time."
 fi
+# The watch itself runs on a lighter model; real tasks go to subagents on a stronger one.
+# WATCHMEN_MODEL and WATCHMEN_TASK_MODEL pick them (haiku, sonnet, opus, fable); anything else is ignored.
+pick_model() {
+  case "$1" in haiku|sonnet|opus|fable) printf '%s' "$1" ;; *) printf '%s' "$2" ;; esac
+}
+watch_model="$(pick_model "${WATCHMEN_MODEL:-}" sonnet)"
+task_model="$(pick_model "${WATCHMEN_TASK_MODEL:-}" opus)"
+task_line="You run on a light model to keep the watch cheap. When the human asks you to perform a task (write or fix something, research, review, draft, analyse), do not do it in this session: hand it to a subagent with the Agent tool and model \"$task_model\", with a complete brief, then report its result in a few sentences. Board work, triage, checks and quick answers stay with you."
 briefing="$(cat "$ROOT/prompts/persona.md")
 
 $skill_line
+
+$task_line
 
 $handoff_line"
 
@@ -60,7 +78,26 @@ if [ -n "${WATCHMEN_PRINT_BRIEFING:-}" ]; then
 fi
 
 mkdir -p .companion
+# Record where the watch is kept, so a board viewer opened in any herdr tab finds this board, and
+# this pid, which exec hands to claude, so the viewer can say when that watch has ended.
+state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/watchmen"
+mkdir -p "$state_dir" && printf '%s\n%s\n' "$PWD" "$$" > "$state_dir/current"
+# Inside herdr, label this pane so the summon action can find the watch from any tab, and record
+# the watch under watchmen/panes/<pane id>: this pid, which exec hands to claude, and the folder.
+# Follow and summon judge a labelled pane by its own record, so a watch elsewhere never answers for
+# it; once claude exits the pid is gone, and summon replaces the pane's leftover shell.
+if [ -n "${HERDR_PANE_ID:-}" ]; then
+  case "$HERDR_PANE_ID" in
+    -*|*[!A-Za-z0-9_:.-]*) ;;
+    *)
+      "${HERDR_BIN_PATH:-herdr}" pane rename "$HERDR_PANE_ID" watchmen >/dev/null 2>&1 || true
+      mkdir -p "$state_dir/panes"
+      node -e 'require("fs").writeFileSync(process.argv[1], JSON.stringify({ pane_id: process.argv[2], pid: Number(process.argv[3]), cwd: process.argv[4] }) + "\n")' \
+        "$state_dir/panes/$HERDR_PANE_ID" "$HERDR_PANE_ID" "$$" "$PWD" || true
+      ;;
+  esac
+fi
 export WATCHMEN=1
 export WATCHMEN_SKILL="$skill"
 
-exec claude --name watchmen --plugin-dir "$ROOT" --append-system-prompt "$briefing" "${@:-Begin the watch.}"
+exec claude --name watchmen --model "$watch_model" --plugin-dir "$ROOT" --append-system-prompt "$briefing" "${@:-Begin the watch.}"
