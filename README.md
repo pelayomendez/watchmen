@@ -21,7 +21,7 @@ An assistant session that runs beside your working sessions and keeps track of e
                                        └────────────────────────────────────────┘
 ```
 
-It runs the [`ambient-companion`](https://github.com/pelayomendez/pelayo-skills/tree/main/skills/productivity/ambient-companion) process under a charter of what it may do alone, must ask first, and never does. It never writes product code and never acts in your other sessions; it watches, sorts, and asks.
+It runs the [`ambient-companion`](https://github.com/pelayomendez/pelayo-skills/tree/main/skills/workflow/ambient-companion) process under a charter of what it may do alone, must ask first, and never does. It never writes product code and never acts in your other sessions; it watches, sorts, and asks.
 
 ## Requirements
 
