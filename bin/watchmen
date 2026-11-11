@@ -31,7 +31,7 @@ find_skill() {
     "$HOME/.agents/skills/ambient-companion/SKILL.md"
   )
   local found
-  found=$(ls -td "$HOME"/.claude/plugins/cache/*/pelayo-skills/*/skills/productivity/ambient-companion/SKILL.md 2>/dev/null | head -1 || true)
+  found=$(ls -td "$HOME"/.claude/plugins/cache/*/pelayo-skills/*/skills/*/ambient-companion/SKILL.md 2>/dev/null | head -1 || true)
   [ -n "$found" ] && candidates+=("$found")
   for path in "${candidates[@]}"; do
     [ -n "$path" ] && [ -f "$path" ] && { echo "$path"; return; }

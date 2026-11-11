@@ -22,7 +22,7 @@ skill_found=0
 for path in "${WATCHMEN_SKILL:-}" "$HOME/.claude/skills/ambient-companion/SKILL.md" "$HOME/.agents/skills/ambient-companion/SKILL.md"; do
   [ -n "$path" ] && [ -f "$path" ] && skill_found=1
 done
-ls "$HOME"/.claude/plugins/cache/*/pelayo-skills/*/skills/productivity/ambient-companion/SKILL.md >/dev/null 2>&1 && skill_found=1
+ls "$HOME"/.claude/plugins/cache/*/pelayo-skills/*/skills/*/ambient-companion/SKILL.md >/dev/null 2>&1 && skill_found=1
 if [ "$skill_found" = 0 ]; then
   echo "watchmen: the ambient-companion skill is not installed yet: npx skills@latest add pelayomendez/pelayo-skills"
 fi
