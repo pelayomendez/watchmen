@@ -200,7 +200,7 @@ export function isRotationDue(input: {
 
 /** The prompt that asks the watch for its handoff before a rotation. Constant: no board text. */
 export const ROTATE_PROMPT =
-  '◆ rotate — the watch has been idle and its conversation is long. Write the handoff now, as your skill describes, to .companion/handoff-<YYYY-MM-DD-HHMM>.md. Do not triage or speak to the human; end the turn once the file is written.'
+  '◆ rotate — the watch has been idle and its conversation is long. Write the handoff now, as your skill describes, to .companion/handoff-<YYYY-MM-DD>.md (update it in place if that file already exists). Do not triage or speak to the human; end the turn once the file is written.'
 
 /** The prompt that starts the watch again on a cleared conversation, from the handoff it wrote. */
 export function resumePrompt(handoff: string): string {
