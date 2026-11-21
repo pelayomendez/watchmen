@@ -35,11 +35,14 @@ import {
   track,
 } from './board'
 import type { CheckOutcome, CheckResult, ItemPatch } from './board'
+import { briefing, pickModel, skillCandidates } from './briefing'
 
-// Watchmen only wakes in the session the launcher starts (WATCHMEN=1), so the plugin can be
-// installed everywhere and stay silent in every other session. The persona and the briefing are
-// the launcher's (--append-system-prompt): a user-installed plugin's prompt.compose hook is
-// bypassed by Claude Code's built-in security plugin, so this module keeps the board and shows it.
+// Watchmen keeps the watch in one session: the one the launcher starts (WATCHMEN=1, the briefing
+// as --append-system-prompt), or one where the person types /watchmen start (the desktop app can
+// pass neither, so the briefing goes in as the first message). Every other session gets only
+// /watchmen, which says how to start, so the plugin can be installed everywhere and stay quiet.
+// A user-installed plugin's prompt.compose hook is bypassed by Claude Code's built-in security
+// plugin, so the briefing never goes through prompt.compose.
 
 const HANDOFF_DIR = '.companion'
 const HANDOFF_PREFIX = 'handoff-'
@@ -52,6 +55,20 @@ const HANDOFF_AT = 75
 const PANE = 'board'
 const PANE_TITLE = '⚛ watchmen'
 const NOT_WATCH = 'Watchmen is not keeping the watch in this session.'
+const HOW_TO_START = `${NOT_WATCH} Type /watchmen start to make this session the watch.`
+const COMMAND_IDLE = {
+  name: 'watchmen',
+  description: 'Start the watch in this session: /watchmen start',
+  argumentHint: 'start',
+}
+const COMMAND_WATCH = {
+  name: 'watchmen',
+  description: 'The watch: open the board, or track <title> | brief | band | approve <id> <hash> | reload | reset',
+  argumentHint: '[track <title> | brief | band | approve <id> <hash> | reload | reset]',
+}
+// Who may turn a session into the watch: the person, typing (in a terminal, through the bridge, or
+// in a session an SDK host such as the desktop app runs), never the model or another plugin.
+const STARTERS: readonly string[] = ['composer', 'bridge', 'sdk']
 
 const WATCH = { plugin: 'watchmen', key: 'watch' } as const
 const VITALS = { plugin: 'watchmen', key: 'vitals' } as const
@@ -467,73 +484,126 @@ async function tick($: EngineInterface) {
   }
 }
 
+// The board tools, registered only in the watch.
+const BOARD_TOOLS = [
+  {
+    name: 'board_track',
+    description:
+      'Add an item to the watch board, or update the one with the same id. Items are anything worth keeping an eye on (a ticket, an MR, another session, a todo); give one a check command and the watch re-runs it and flags the item when its output changes.',
+    inputSchema: { type: 'object', properties: ITEM_PROPERTIES },
+  },
+  {
+    name: 'board_move',
+    description: 'Move a board item to another lane and/or set its one-line note. Clears its changed flag: use it to triage.',
+    inputSchema: {
+      type: 'object',
+      properties: { id: ITEM_PROPERTIES.id, lane: ITEM_PROPERTIES.lane, note: ITEM_PROPERTIES.note },
+      required: ['id'],
+    },
+  },
+  {
+    name: 'board_drop',
+    description: 'Remove an item from the watch board.',
+    inputSchema: { type: 'object', properties: { id: ITEM_PROPERTIES.id }, required: ['id'] },
+  },
+  {
+    name: 'board_changes',
+    description:
+      'List the board items whose check output changed since the last triage, with what the check says now. Triage each with board_move.',
+    inputSchema: { type: 'object', properties: {} },
+  },
+]
+
+// Whether this environment's check timer runs: a hot reload starts a fresh environment, whose
+// session.start arms it again; a /watchmen start in a session already watching does not.
+let isTicking = false
+
+/**
+ * Makes this session the watch, or picks the watch up again after a hot reload: the watch and the
+ * board in state (board.json loaded only the first time), the command and the board tools
+ * registered, and the check timer running. The launcher's session.start and /watchmen start both
+ * come here. `skill` is where the ambient-companion skill was found, if it was.
+ */
+async function startWatch($: EngineInterface, skill: string | undefined): Promise<Watch> {
+  let watch = (await $.state.get(WATCH)).value
+  if (!watch) {
+    const boardError = await loadBoard($)
+    watch = {
+      handoff: await latestHandoff($),
+      skill,
+      ...(await herdrOf($)),
+      startedAt: await $.clock.now(),
+      warned: false,
+      ...(boardError ? { boardError } : {}),
+    } satisfies Watch
+    await $.state.set(WATCH, watch)
+  }
+  await $.command.register(COMMAND_WATCH)
+  for (const tool of BOARD_TOOLS) await $.tool.register({ ...tool, isDeferred: false })
+  // Versions before 0.3 pinned a status line; a reload would leave it on screen, drawn as a warning.
+  $.ui.status(undefined)
+  if (!isTicking) {
+    isTicking = true
+    await tick($)
+    $.clock.every(TICK_MS, () => void tick($))
+  }
+  return watch
+}
+
+/** The directories (or links to them) inside path, as paths; none when it is missing. */
+async function subdirs($: EngineInterface, path: string): Promise<string[]> {
+  if (!(await $.fs.exists(path))) return []
+  const entries = await $.fs.list(path).catch(() => [])
+  return entries.filter(one => one.kind === 'dir' || one.isLink).map(one => `${path}/${one.name}`)
+}
+
+/**
+ * The ambient-companion skill, looked for where the launcher's find_skill looks: WATCHMEN_SKILL,
+ * the two skill folders, then the newest copy in any pelayo-skills bucket of the plugin cache.
+ */
+async function findSkill($: EngineInterface): Promise<string | undefined> {
+  try {
+    const home = (await $.env.get('HOME')) || undefined
+    for (const path of skillCandidates(home, (await $.env.get('WATCHMEN_SKILL')) || undefined)) {
+      if (await $.fs.exists(path)) return path
+    }
+    if (!home) return undefined
+    const found: { path: string; mtimeMs: number }[] = []
+    for (const market of await subdirs($, `${home}/.claude/plugins/cache`)) {
+      for (const version of await subdirs($, `${market}/pelayo-skills`)) {
+        for (const bucket of await subdirs($, `${version}/skills`)) {
+          const path = `${bucket}/ambient-companion/SKILL.md`
+          if (await $.fs.exists(path)) found.push({ path, mtimeMs: (await $.fs.stat(path)).mtimeMs })
+        }
+      }
+    }
+    return found.sort((a, b) => b.mtimeMs - a.mtimeMs)[0]?.path
+  } catch {
+    return undefined
+  }
+}
+
+/** The briefing for /watchmen start: the launcher's, built here from the plugin's own persona. */
+async function startBriefing($: EngineInterface, watch: Watch): Promise<string> {
+  const persona = await $.fs.read(`${$.plugin.root}/prompts/persona.md`).catch(() => '')
+  const taskModel = pickModel((await $.env.get('WATCHMEN_TASK_MODEL')) || undefined, 'opus')
+  return briefing({ persona: String(persona), skill: watch.skill, handoff: watch.handoff, taskModel })
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const result = await next(e)
-
     // The flag is read once and kept in the session's state, then cleared from the environment so
     // a claude started from this session's shell is not taken for the watch. A hot reload runs
     // session.start again and finds the watch, and the board, in state.
-    let watch = (await $.state.get(WATCH)).value
-    if (!watch) {
-      if ((await $.env.get('WATCHMEN')) !== '1') return result
-      const entries = (await $.fs.exists(HANDOFF_DIR)) ? await $.fs.list(HANDOFF_DIR) : []
-      const latest = newestHandoff(entries.filter(one => one.kind === 'file').map(one => one.name))
-      const boardError = await loadBoard($)
-      watch = {
-        handoff: latest && `${HANDOFF_DIR}/${latest}`,
-        skill: (await $.env.get('WATCHMEN_SKILL')) || undefined,
-        ...(await herdrOf($)),
-        startedAt: await $.clock.now(),
-        warned: false,
-        ...(boardError ? { boardError } : {}),
-      } satisfies Watch
-      await $.state.set(WATCH, watch)
+    const isLaunched = (await $.env.get('WATCHMEN')) === '1'
+    if (!(await isWatch($)) && !isLaunched) {
+      await $.command.register(COMMAND_IDLE)
+      return result
     }
+    await startWatch($, (await $.env.get('WATCHMEN_SKILL')) || undefined)
     await $.env.set('WATCHMEN', undefined)
     await $.env.set('WATCHMEN_SKILL', undefined)
-
-    await $.command.register({
-      name: 'watchmen',
-      description: 'The watch: open the board, or track <title> | brief | band | approve <id> <hash> | reload | reset',
-      argumentHint: '[track <title> | brief | band | approve <id> <hash> | reload | reset]',
-    })
-    await $.tool.register({
-      name: 'board_track',
-      description:
-        'Add an item to the watch board, or update the one with the same id. Items are anything worth keeping an eye on (a ticket, an MR, another session, a todo); give one a check command and the watch re-runs it and flags the item when its output changes.',
-      inputSchema: { type: 'object', properties: ITEM_PROPERTIES },
-      isDeferred: false,
-    })
-    await $.tool.register({
-      name: 'board_move',
-      description: 'Move a board item to another lane and/or set its one-line note. Clears its changed flag: use it to triage.',
-      inputSchema: {
-        type: 'object',
-        properties: { id: ITEM_PROPERTIES.id, lane: ITEM_PROPERTIES.lane, note: ITEM_PROPERTIES.note },
-        required: ['id'],
-      },
-      isDeferred: false,
-    })
-    await $.tool.register({
-      name: 'board_drop',
-      description: 'Remove an item from the watch board.',
-      inputSchema: { type: 'object', properties: { id: ITEM_PROPERTIES.id }, required: ['id'] },
-      isDeferred: false,
-    })
-    await $.tool.register({
-      name: 'board_changes',
-      description:
-        'List the board items whose check output changed since the last triage, with what the check says now. Triage each with board_move.',
-      inputSchema: { type: 'object', properties: {} },
-      isDeferred: false,
-    })
-
-    // Versions before 0.3 pinned a status line; a reload would leave it on screen, drawn as a warning.
-    $.ui.status(undefined)
-    await tick($)
-    $.clock.every(TICK_MS, () => void tick($))
-
     return result
   })
 
@@ -587,8 +657,25 @@ export const register: Register = on => {
 
   on('command.run', { command: 'watchmen' }, async ($, e) => {
     const watch = (await $.state.get(WATCH)).value
-    if (!watch) return { text: NOT_WATCH }
     const [verb, ...rest] = e.args.trim().split(/\s+/)
+    if (verb === 'start') {
+      if (watch) {
+        await $.ui.open({ id: PANE, title: PANE_TITLE }).catch(() => undefined)
+        return { text: 'This session already keeps the watch.' }
+      }
+      if (!STARTERS.includes(e.origin.kind)) return { text: 'Only you can start the watch: type /watchmen start yourself.' }
+      const started = await startWatch($, await findSkill($))
+      await $.ui.open({ id: PANE, title: PANE_TITLE }).catch(() => undefined)
+      // The briefing is the watch's first message. A command.run hook cannot submit a prompt (it
+      // would wait on the turn the hook holds), so a timer sends it once the command has answered;
+      // the engine starts that turn when the session is idle, the board tools registered above in it.
+      const text = await startBriefing($, started)
+      $.clock.after(0, () => {
+        void $.prompt.submit({ text }).catch(error => $.ui.log(`watchmen: the briefing was not sent: ${String(error)}`))
+      })
+      return { text: 'This session keeps the watch now. The briefing goes in as the first message.' }
+    }
+    if (!watch) return { text: HOW_TO_START }
     if (verb === 'track') {
       const title = rest.join(' ')
       if (!title) return { text: 'Usage: /watchmen track <title>' }

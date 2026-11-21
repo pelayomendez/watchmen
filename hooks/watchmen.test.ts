@@ -5,6 +5,7 @@ import type { Engine } from 'claude-code/testing'
 import type { Item } from '../types'
 import { applyCheck, applyToBoard, approvalLines, attempt, dueChecks, enteredNeedsYou, MASCOT_COLORS, mascotState, paintAtom, queueWake, SIDEBAR_ROW, sidebarToken, sidebarTokens, wakePrompt, move, parse, parseBoard, serialize, vitals, isRotationDue, ROTATE_IDLE_MS, ROTATE_PROMPT, summary, track } from './board'
 import { newestBackupOf, newestHandoff } from './register'
+import { briefing, pickModel, skillCandidates } from './briefing'
 
 const MIN = 60_000
 
@@ -137,8 +138,10 @@ test('board.json: a check with a bad interval falls back to the default, and a c
   ])
 })
 
-// The engine hands an fs hook the path resolved against the working directory.
-const relative = (path: string) => (path.includes('.companion') ? path.slice(path.indexOf('.companion')) : path)
+// The engine hands an fs hook the path resolved against the working directory. The plugin's own
+// persona is served as prompts/persona.md, wherever the plugin sits.
+const relative = (path: string) =>
+  path.includes('.companion') ? path.slice(path.indexOf('.companion')) : path.endsWith('/prompts/persona.md') ? 'prompts/persona.md' : path
 
 const PROCESS_OK = { exitCode: 0, stderr: '', isStdoutTruncated: false, isStderrTruncated: false }
 
@@ -172,7 +175,8 @@ function engine(on: On, files: Record<string, string>, percent: number) {
   })
   let tokens: number | undefined
   on('session.usage', () => ({ value: { startedAt: 0, context: { window: 200_000, percent, tokens }, rateLimits: [] } }))
-  on('command.register', () => ({ value: undefined }) as never)
+  const commands: string[] = []
+  on('command.register', ($, e) => (commands.push(`${e.name}: ${e.description}`), { value: undefined }) as never)
   const tools: string[] = []
   on('tool.register', ($, e) => (tools.push(e.name), { value: { tool: `mcp__watchmen__${e.name}` } }))
   const cleared: string[] = []
@@ -220,6 +224,7 @@ function engine(on: On, files: Record<string, string>, percent: number) {
   })
   return {
     clock,
+    commands,
     status,
     toasts,
     cleared,
@@ -268,6 +273,91 @@ test('stays silent when the session was not launched as watchmen', async ($, on)
   expect(seen.status).toEqual([])
   expect(seen.tools).toEqual([])
   expect(seen.runs).toEqual([])
+  // Only /watchmen, which says how to start.
+  expect(seen.commands).toEqual(['watchmen: Start the watch in this session: /watchmen start'])
+})
+
+const BOARD_TOOLS = ['board_track', 'board_move', 'board_drop', 'board_changes']
+const NOT_WATCH = 'Watchmen is not keeping the watch in this session.'
+
+test('outside the watch the board tools are refused and /watchmen says how to start', async ($, on) => {
+  mock.env(on, {})
+  const seen = engine(on, {}, 10)
+  await $.session.start(START)
+  await seen.clock.settle()
+  expect((await $.tool.call({ tool: 'mcp__watchmen__board_track', title: 'x' })).deny).toBe(NOT_WATCH)
+  expect((await $.tool.call({ tool: 'mcp__watchmen__board_changes' })).deny).toBe(NOT_WATCH)
+  for (const args of ['', 'brief', 'track a todo', 'approve a 0123', 'reset']) {
+    expect((await $.command.run(typed(args))).text).toBe(`${NOT_WATCH} Type /watchmen start to make this session the watch.`)
+  }
+  expect(seen.writes['.companion/board.json']).toBeUndefined()
+  // The model or another plugin cannot make a session the watch.
+  const byPlugin = await $.command.run({ ...typed('start'), origin: { kind: 'plugin', name: 'other' } } as never)
+  expect(byPlugin.text).toContain('Only you can start the watch')
+  expect(seen.tools).toEqual([])
+  expect(seen.prompts).toEqual([])
+})
+
+test('/watchmen start makes a session that was not launched the watch: state, tools, pane and briefing', async ($, on) => {
+  mock.env(on, { HOME: '/home/u' })
+  const seen = engine(
+    on,
+    {
+      '.companion/board.json': serialize([{ id: 'deck', title: 'Deck review', lane: 'needs-you' }]),
+      '.companion/handoff-2026-11-20.md': 'last',
+      'prompts/persona.md': 'You are the watch: PERSONA.\n',
+      '/home/u/.claude/skills/ambient-companion/SKILL.md': '# skill',
+    },
+    10,
+  )
+  await $.session.start(START)
+  await seen.clock.settle()
+  expect(seen.tools).toEqual([])
+
+  // The desktop app's sessions are SDK-hosted: the person's typing arrives as `sdk` there.
+  const started = await $.command.run({ ...typed('start'), origin: { kind: 'sdk' } } as never)
+  expect(started.text).toBe('This session keeps the watch now. The briefing goes in as the first message.')
+  await seen.clock.settle()
+
+  expect(seen.tools).toEqual(BOARD_TOOLS)
+  expect(seen.commands.at(-1)).toContain('watchmen: The watch: open the board')
+  expect(seen.opened).toEqual(['board'])
+  expect(seen.logs).toEqual([])
+  expect(seen.prompts).toHaveLength(1)
+  const brief = seen.prompts[0] ?? ''
+  expect(brief.startsWith('You are the watch: PERSONA.\n\n')).toBe(true)
+  expect(brief).toContain('ambient-companion skill at /home/u/.claude/skills/ambient-companion/SKILL.md')
+  expect(brief).toContain('Agent tool and model "opus"')
+  expect(brief).toContain('.companion/about-you.md')
+  expect(brief).toContain('handoff at .companion/handoff-2026-11-20.md')
+
+  // The watch is kept in state, the board was loaded, and the tools work now.
+  const report = (await $.command.run(typed(''))).text ?? ''
+  expect(report).toContain('handoff: .companion/handoff-2026-11-20.md')
+  expect(report).toContain('skill:   /home/u/.claude/skills/ambient-companion/SKILL.md')
+  expect(report).toContain('Deck review')
+  seen.opened.length = 0
+  expect((await $.tool.call({ tool: 'mcp__watchmen__board_track', title: 'New thing' })).result).toBe('Tracked. 2 items on the board.')
+
+  // A second start keeps the one watch: no second briefing, the pane brought back.
+  expect((await $.command.run(typed('start'))).text).toBe('This session already keeps the watch.')
+  await seen.clock.settle()
+  expect(seen.prompts).toHaveLength(1)
+  expect(seen.opened).toEqual(['board'])
+})
+
+test('the briefing is the launcher\'s: persona, skill, task model, about-you, handoff', () => {
+  const text = briefing({ persona: 'P\n', taskModel: 'opus' })
+  const parts = text.split('\n\n')
+  expect(parts[0]).toBe('P')
+  expect(parts[1]).toContain('skill was not found')
+  expect(parts[2]).toContain('model "opus"')
+  expect(parts[3]).toContain('.companion/about-you.md')
+  expect(parts[4]).toContain('There is no handoff')
+  expect(pickModel('fable', 'opus')).toBe('fable')
+  expect(pickModel('x"; rm', 'opus')).toBe('opus')
+  expect(skillCandidates('/h', '')).toEqual(['/h/.claude/skills/ambient-companion/SKILL.md', '/h/.agents/skills/ambient-companion/SKILL.md'])
+  expect(skillCandidates(undefined, '/s/SKILL.md')).toEqual(['/s/SKILL.md'])
 })
 
 test('a check never runs until the human approves its command, and the model cannot approve it', async ($, on) => {
