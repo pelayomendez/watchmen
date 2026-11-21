@@ -29,7 +29,7 @@ export function skillLine(skill: string | undefined): string {
 }
 
 export function taskLine(taskModel: string): string {
-  return `You run on a light model to keep the watch cheap. When the human asks you to perform a task (write or fix something, research, review, draft, analyse), do not do it in this session: hand it to a subagent with the Agent tool and model "${taskModel}", with a complete brief, then report its result in a few sentences. Board work, triage, checks and quick answers stay with you.`
+  return `Keep this session for the watch. When the human asks you to perform a task (write or fix something, research, review, draft, analyse), do not do it in this session: hand it to a subagent with the Agent tool and model "${taskModel}", with a complete brief, then report its result in a few sentences. Board work, triage, checks and quick answers stay with you.`
 }
 
 export function aboutYouLine(): string {
