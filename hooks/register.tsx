@@ -19,6 +19,7 @@ import {
   serialize,
   bandLayout,
   mascotState,
+  MASCOT_COLORS,
   paintAtom,
   sidebarTokens,
   enteredNeedsYou,
@@ -32,6 +33,7 @@ import {
   ROTATE_PROMPT,
   resumePrompt,
   summary,
+  glance,
   track,
 } from './board'
 import type { CheckOutcome, CheckResult, ItemPatch } from './board'
@@ -775,10 +777,33 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const { Box, Text } = $.ui.resolve(e)
+    const elements = $.ui.resolve(e)
+    const { Box, Text } = elements
     const items = await read($, board)
     const width = Math.max(10, e.props.bodyColumns)
     const fit = (text: string) => (text.length > width ? `${text.slice(0, width - 1)}…` : text)
+    // Minimized on the desktop app: a glance, the mascot and the counts, then what needs you first.
+    if (e.props.placement === 'widget') {
+      const state = mascotState(items)
+      const seen = glance(items)
+      const Svg = 'Svg' in elements ? elements.Svg : undefined
+      const atom = Svg ? await atomSvg($, state) : undefined
+      return (
+        <Box flexDirection="column">
+          <Box flexDirection="row">
+            {Svg && atom ? (
+              <Svg key="mascot" source={atom} alt="⚛" width={16} height={16} />
+            ) : (
+              <Text key="mascot" color={MASCOT_COLORS[state]} bold={state === 'needs-you'}>⚛</Text>
+            )}
+            <Text key="counts">{fit(` ${seen.counts}`)}</Text>
+          </Box>
+          <Text key="first" color={seen.isNeedsYou ? MASCOT_COLORS['needs-you'] : undefined} dimColor={!seen.isNeedsYou}>
+            {fit(seen.first)}
+          </Text>
+        </Box>
+      )
+    }
     if (items.length === 0) {
       return (
         <Box flexDirection="column">

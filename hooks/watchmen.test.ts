@@ -3,7 +3,7 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 
 import type { Item } from '../types'
-import { applyCheck, applyToBoard, approvalLines, attempt, dueChecks, enteredNeedsYou, MASCOT_COLORS, mascotState, paintAtom, queueWake, SIDEBAR_ROW, sidebarToken, sidebarTokens, wakePrompt, move, parse, parseBoard, serialize, vitals, isRotationDue, ROTATE_IDLE_MS, ROTATE_PROMPT, summary, track } from './board'
+import { applyCheck, applyToBoard, approvalLines, attempt, dueChecks, enteredNeedsYou, glance, MASCOT_COLORS, mascotState, paintAtom, queueWake, SIDEBAR_ROW, sidebarToken, sidebarTokens, wakePrompt, move, parse, parseBoard, serialize, vitals, isRotationDue, ROTATE_IDLE_MS, ROTATE_PROMPT, summary, track } from './board'
 import { newestBackupOf, newestHandoff } from './register'
 import { briefing, pickModel, skillCandidates } from './briefing'
 
@@ -748,6 +748,39 @@ const BAND_BOARD = serialize([
   { id: 'w1', title: 'W1', lane: 'waiting' },
   { id: 'w2', title: 'W2', lane: 'waiting' },
 ])
+
+test('the widget glance: the counts, then what needs you first, else what changed, else quiet', () => {
+  const quiet = glance([{ id: 'm', title: 'M', lane: 'moving' }])
+  expect(quiet).toEqual({ counts: '0 need you · 1 moving · 0 waiting', first: 'Nothing needs you.', isNeedsYou: false })
+  expect(glance([{ id: 'm', title: 'M', lane: 'moving', isChanged: true }]).first).toBe('changed: M')
+  const needs = glance([{ id: 'm', title: 'M', lane: 'moving', isChanged: true }, { id: 'd', title: 'Deck\n', lane: 'needs-you', note: 'review' }])
+  expect(needs).toMatchObject({ first: 'Deck : review', isNeedsYou: true })
+})
+
+test('seated as a desktop widget, the pane draws the glance instead of the board', async ($, on) => {
+  mock.env(on, { WATCHMEN: '1' })
+  const seen = engine(
+    on,
+    { '.companion/board.json': serialize([{ id: 'd', title: 'Deck review', lane: 'needs-you' }, { id: 'm', title: 'Slice 2', lane: 'moving' }]) },
+    10,
+  )
+  await $.session.start(START)
+  await seen.clock.settle()
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const pane = await $.ui.mount({
+      plugin: 'watchmen',
+      surface,
+      component: 'Pane',
+      requestId: 'board',
+      props: { title: '⚛ watchmen', isFocused: false, bodyColumns: 40, placement: 'widget', scroll: { offset: 0, bodyRows: 3 }, view: {} },
+    })
+    const text = JSON.stringify(await pane.drawn())
+    expect(text).toContain('1 need you · 1 moving · 0 waiting')
+    expect(text).toContain('Deck review')
+    expect(text).not.toContain('Slice 2')
+    expect(text).not.toContain('Needs you (')
+  }
+})
 
 function mountBand($: Engine, bodyColumns: number) {
   return $.ui.mount({
