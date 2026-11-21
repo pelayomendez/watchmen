@@ -64,11 +64,16 @@ pick_model() {
 watch_model="$(pick_model "${WATCHMEN_MODEL:-}" sonnet)"
 task_model="$(pick_model "${WATCHMEN_TASK_MODEL:-}" opus)"
 task_line="You run on a light model to keep the watch cheap. When the human asks you to perform a task (write or fix something, research, review, draft, analyse), do not do it in this session: hand it to a subagent with the Agent tool and model \"$task_model\", with a complete brief, then report its result in a few sentences. Board work, triage, checks and quick answers stay with you."
+# The person's standing preferences, kept by the watch itself (prompts/persona.md says how).
+about_line="What you know of the human's standing preferences is in .companion/about-you.md: read it now if it exists, and keep it as the persona says."
+# hooks/briefing.ts builds the same briefing for /watchmen start: keep the two in step.
 briefing="$(cat "$ROOT/prompts/persona.md")
 
 $skill_line
 
 $task_line
+
+$about_line
 
 $handoff_line"
 
