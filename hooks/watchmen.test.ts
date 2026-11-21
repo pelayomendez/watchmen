@@ -63,7 +63,7 @@ test('checks are due by their own interval, at least a minute, never twice at on
 
 test('items are flexible: any kind, merged by id, and a new check starts from a fresh baseline', () => {
   let items = track([], { title: 'Update plan v3', kind: 'todo' }, 'needs-you')
-  expect(items[0]).toMatchObject({ id: 'review-deck-v3', lane: 'needs-you', kind: 'todo' })
+  expect(items[0]).toMatchObject({ id: 'update-plan-v3', lane: 'needs-you', kind: 'todo' })
   items = track(items, { id: 'ABC-1', title: 'Frames', kind: 'jira', check: { argv: ['acli'] } })
   items = items.map(one => (one.id === 'ABC-1' ? { ...one, last: 'In Progress', isChanged: true } : one))
   items = track(items, { id: 'ABC-1', note: 'waiting on backend' })
@@ -664,7 +664,7 @@ function mountBand($: Engine, bodyColumns: number) {
     plugin: 'watchmen',
     surface: 'terminal',
     component: 'AbovePrompt',
-    props: { hasSurvey: false, isWorking: false, maxRows: 3, bodyColumns, scroll: { offset: 0, bodyRows: 3 }, view: {} },
+    props: { hasSurvey: false, isCollapsed: false, isWorking: false, maxRows: 3, bodyColumns, scroll: { offset: 0, bodyRows: 3 }, view: {} },
   })
 }
 
