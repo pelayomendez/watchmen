@@ -527,7 +527,17 @@ let isTicking = false
  * come here. `skill` is where the ambient-companion skill was found, if it was.
  */
 async function startWatch($: EngineInterface, skill: string | undefined): Promise<Watch> {
-  let watch = (await $.state.get(WATCH)).value
+  const held = (await $.state.get(WATCH)).value
+  // The command and the tools go in first and the watch is written to state last, so a start that
+  // fails part way leaves no watch behind: /watchmen still offers start, and a retry runs it all.
+  try {
+    await $.command.register(COMMAND_WATCH)
+    for (const tool of BOARD_TOOLS) await $.tool.register({ ...tool, isDeferred: false })
+  } catch (error) {
+    if (!held) await $.command.register(COMMAND_IDLE).catch(() => undefined)
+    throw error
+  }
+  let watch = held
   if (!watch) {
     const boardError = await loadBoard($)
     watch = {
@@ -540,14 +550,13 @@ async function startWatch($: EngineInterface, skill: string | undefined): Promis
     } satisfies Watch
     await $.state.set(WATCH, watch)
   }
-  await $.command.register(COMMAND_WATCH)
-  for (const tool of BOARD_TOOLS) await $.tool.register({ ...tool, isDeferred: false })
   // Versions before 0.3 pinned a status line; a reload would leave it on screen, drawn as a warning.
   $.ui.status(undefined)
   if (!isTicking) {
+    // The timer is armed before the first tick runs, so a first tick that fails cannot leave it off.
     isTicking = true
-    await tick($)
-    $.clock.every(TICK_MS, () => void tick($))
+    $.clock.every(TICK_MS, () => void tick($).catch(error => $.ui.log(`watchmen: tick failed: ${String(error)}`)))
+    void tick($).catch(error => $.ui.log(`watchmen: tick failed: ${String(error)}`))
   }
   return watch
 }
@@ -666,14 +675,20 @@ export const register: Register = on => {
         return { text: 'This session already keeps the watch.' }
       }
       if (!STARTERS.includes(e.origin.kind)) return { text: 'Only you can start the watch: type /watchmen start yourself.' }
-      const started = await startWatch($, await findSkill($))
+      let started: Watch
+      try {
+        started = await startWatch($, await findSkill($))
+      } catch (error) {
+        return { text: `The watch could not start: ${String(error)}. Type /watchmen start to try again.` }
+      }
       await $.ui.open({ id: PANE, title: PANE_TITLE }).catch(() => undefined)
       // The briefing is the watch's first message. A command.run hook cannot submit a prompt (it
       // would wait on the turn the hook holds), so a timer sends it once the command has answered;
       // the engine starts that turn when the session is idle, the board tools registered above in it.
+      // The person typed /watchmen start, so the model reads the briefing as their own words.
       const text = await startBriefing($, started)
       $.clock.after(0, () => {
-        void $.prompt.submit({ text }).catch(error => $.ui.log(`watchmen: the briefing was not sent: ${String(error)}`))
+        void $.prompt.submit({ text, asUser: true }).catch(error => $.ui.log(`watchmen: the briefing was not sent: ${String(error)}`))
       })
       return { text: 'This session keeps the watch now. The briefing goes in as the first message.' }
     }

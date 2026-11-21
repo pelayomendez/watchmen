@@ -174,11 +174,26 @@ function engine(on: On, files: Record<string, string>, percent: number) {
     return { value: undefined }
   })
   let tokens: number | undefined
-  on('session.usage', () => ({ value: { startedAt: 0, context: { window: 200_000, percent, tokens }, rateLimits: [] } }))
+  let failNextUsage = false
+  on('session.usage', () => {
+    if (failNextUsage) {
+      failNextUsage = false
+      throw new Error('usage unavailable')
+    }
+    return { value: { startedAt: 0, context: { window: 200_000, percent, tokens }, rateLimits: [] } }
+  })
   const commands: string[] = []
   on('command.register', ($, e) => (commands.push(`${e.name}: ${e.description}`), { value: undefined }) as never)
   const tools: string[] = []
-  on('tool.register', ($, e) => (tools.push(e.name), { value: { tool: `mcp__watchmen__${e.name}` } }))
+  let failNextRegister = false
+  on('tool.register', ($, e) => {
+    if (failNextRegister) {
+      failNextRegister = false
+      throw new Error('register refused')
+    }
+    tools.push(e.name)
+    return { value: { tool: `mcp__watchmen__${e.name}` } }
+  })
   const cleared: string[] = []
   on('env.set', ($, e) => (cleared.push(e.name), { value: undefined }) as never)
   const status: (string | undefined)[] = []
@@ -192,6 +207,7 @@ function engine(on: On, files: Record<string, string>, percent: number) {
   let draft = ''
   on('prompt.read', () => ({ value: { text: draft, cursor: draft.length } }))
   const prompts: string[] = []
+  const asUser: string[] = []
   let submitGate: Promise<void> | undefined
   let failNextSubmit = false
   on('prompt.submit', async ($, e) => {
@@ -201,6 +217,7 @@ function engine(on: On, files: Record<string, string>, percent: number) {
       throw new Error('submit refused')
     }
     prompts.push(e.text)
+    if (e.origin.kind === 'plugin' && e.origin.asUser) asUser.push(e.text)
     return { text: e.text } as never
   })
   const logs: string[] = []
@@ -236,6 +253,9 @@ function engine(on: On, files: Record<string, string>, percent: number) {
     addFile: (path: string, text: string) => (files[path] = text),
     setDraft: (text: string) => (draft = text),
     failNextSubmit: () => (failNextSubmit = true),
+    failNextUsage: () => (failNextUsage = true),
+    failNextRegister: () => (failNextRegister = true),
+    asUser,
     holdSubmit: () => {
       let release = () => {}
       submitGate = new Promise(resolve => (release = resolve))
@@ -324,6 +344,8 @@ test('/watchmen start makes a session that was not launched the watch: state, to
   expect(seen.opened).toEqual(['board'])
   expect(seen.logs).toEqual([])
   expect(seen.prompts).toHaveLength(1)
+  // The person typed /watchmen start, so the briefing reads as their own words.
+  expect(seen.asUser).toEqual(seen.prompts)
   const brief = seen.prompts[0] ?? ''
   expect(brief.startsWith('You are the watch: PERSONA.\n\n')).toBe(true)
   expect(brief).toContain('ambient-companion skill at /home/u/.claude/skills/ambient-companion/SKILL.md')
@@ -344,6 +366,23 @@ test('/watchmen start makes a session that was not launched the watch: state, to
   await seen.clock.settle()
   expect(seen.prompts).toHaveLength(1)
   expect(seen.opened).toEqual(['board'])
+})
+
+test('a start that fails half way leaves no watch behind, and the next start works', async ($, on) => {
+  mock.env(on, { HOME: '/home/u' })
+  const seen = engine(on, { 'prompts/persona.md': 'P' }, 10)
+  await $.session.start(START)
+  await seen.clock.settle()
+  seen.failNextRegister()
+  expect((await $.command.run(typed('start'))).text).toContain('The watch could not start')
+  await seen.clock.settle()
+  expect(seen.prompts).toEqual([])
+  expect(seen.commands.at(-1)).toBe('watchmen: Start the watch in this session: /watchmen start')
+  expect((await $.tool.call({ tool: 'mcp__watchmen__board_track', title: 'x' })).deny).toBe(NOT_WATCH)
+  expect((await $.command.run(typed('start'))).text).toBe('This session keeps the watch now. The briefing goes in as the first message.')
+  await seen.clock.settle()
+  expect(seen.tools).toEqual(BOARD_TOOLS)
+  expect(seen.prompts).toHaveLength(1)
 })
 
 test('the briefing is the launcher\'s: persona, skill, task model, about-you, handoff', () => {
@@ -441,6 +480,18 @@ test('as watchmen: an approved check runs on its interval and flags a change', a
   await seen.clock.advance(5 * MIN)
   expect(seen.toasts.length).toBe(toasts + 1)
   expect(savedBoard(seen)[0]?.last).toBe(head)
+})
+
+test('a first tick that fails still leaves the check timer running', async ($, on) => {
+  mock.env(on, { WATCHMEN: '1' })
+  const seen = engine(on, { '.companion/board.json': serialize([{ ...JIRA, check: { argv: ['acli', 'jira'], everyMs: MIN } }]) }, 10)
+  seen.failNextUsage()
+  await $.session.start(START)
+  await seen.clock.settle()
+  expect(seen.logs.some(line => line.includes('tick failed'))).toBe(true)
+  await $.command.run(typed(`approve ABC-1 ${savedBoard(seen)[0]?.approvalHash}`))
+  await seen.clock.advance(15_000)
+  expect(seen.runs).toEqual([['acli', 'jira']])
 })
 
 test('a slow check is never started a second time while the first still runs', async ($, on) => {
