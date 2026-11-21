@@ -66,7 +66,9 @@ The Claude desktop app cannot run the launcher, so the watch starts from inside 
 2. Open a session in your workspace folder, the one whose `.companion/` holds the board and the handoffs.
 3. Type `/watchmen start`.
 
-That session becomes the watch: it loads the board, opens the board pane, and sends the launcher's briefing as its first message. It runs on the model you picked in the app, and still hands real tasks to an `opus` subagent. Minimize the pane and it stays on screen as a widget: the mascot, the lane counts and the first thing that needs you.
+That session becomes the watch: it loads the board, opens the board pane, and sends the launcher's briefing as its first message. It runs on the model you picked in the app, and still hands real tasks to an `opus` subagent. Minimize the pane and it stays on screen as a widget: the mascot, the lane counts and the first thing that needs you. The model and other plugins cannot start the watch: `/watchmen start` is refused unless it is typed.
+
+**Approving checks.** `/watchmen approve <id> <hash>` counts only when you type it in a terminal session or through Remote Control. Typing it in the desktop app may not count until that has been confirmed, so approve new checks from a terminal (`claude` in the same workspace) for now; the approval holds for the workspace, so the desktop watch runs the check from then on.
 
 ## It remembers you
 
