@@ -430,3 +430,17 @@ export const SIDEBAR_ROW =
   `[{ token = "$watchmen_alert", fg = "${MASCOT_COLORS['needs-you']}", bold = true }, ` +
   `{ token = "$watchmen_changed", fg = "${MASCOT_COLORS.changed}" }, ` +
   `{ token = "$watchmen_quiet", dim = true }]`
+
+/**
+ * The pane as a desktop widget, read at a glance: the lane counts, then the first item that needs
+ * the human (else the first that changed, else that nothing does), cleaned for display.
+ */
+export function glance(items: readonly Item[]): { counts: string; first: string; isNeedsYou: boolean } {
+  const tally = counts(items)
+  const line = `${tally['needs-you']} need you · ${tally.moving} moving · ${tally.waiting} waiting`
+  const needs = items.find(one => one.lane === 'needs-you')
+  if (needs) return { counts: line, first: sanitize(needs.note ? `${needs.title}: ${needs.note}` : needs.title), isNeedsYou: true }
+  const changed = items.find(one => one.isChanged && one.lane !== 'done')
+  if (changed) return { counts: line, first: sanitize(`changed: ${changed.title}`), isNeedsYou: false }
+  return { counts: line, first: 'Nothing needs you.', isNeedsYou: false }
+}

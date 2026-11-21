@@ -3,8 +3,9 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 
 import type { Item } from '../types'
-import { applyCheck, applyToBoard, approvalLines, attempt, dueChecks, enteredNeedsYou, MASCOT_COLORS, mascotState, paintAtom, queueWake, SIDEBAR_ROW, sidebarToken, sidebarTokens, wakePrompt, move, parse, parseBoard, serialize, vitals, isRotationDue, ROTATE_IDLE_MS, ROTATE_PROMPT, summary, track } from './board'
+import { applyCheck, applyToBoard, approvalLines, attempt, dueChecks, enteredNeedsYou, glance, MASCOT_COLORS, mascotState, paintAtom, queueWake, SIDEBAR_ROW, sidebarToken, sidebarTokens, wakePrompt, move, parse, parseBoard, serialize, vitals, isRotationDue, ROTATE_IDLE_MS, ROTATE_PROMPT, summary, track } from './board'
 import { newestBackupOf, newestHandoff } from './register'
+import { briefing, pickModel, skillCandidates } from './briefing'
 
 const MIN = 60_000
 
@@ -63,7 +64,7 @@ test('checks are due by their own interval, at least a minute, never twice at on
 
 test('items are flexible: any kind, merged by id, and a new check starts from a fresh baseline', () => {
   let items = track([], { title: 'Update plan v3', kind: 'todo' }, 'needs-you')
-  expect(items[0]).toMatchObject({ id: 'review-deck-v3', lane: 'needs-you', kind: 'todo' })
+  expect(items[0]).toMatchObject({ id: 'update-plan-v3', lane: 'needs-you', kind: 'todo' })
   items = track(items, { id: 'ABC-1', title: 'Frames', kind: 'jira', check: { argv: ['acli'] } })
   items = items.map(one => (one.id === 'ABC-1' ? { ...one, last: 'In Progress', isChanged: true } : one))
   items = track(items, { id: 'ABC-1', note: 'waiting on backend' })
@@ -137,8 +138,10 @@ test('board.json: a check with a bad interval falls back to the default, and a c
   ])
 })
 
-// The engine hands an fs hook the path resolved against the working directory.
-const relative = (path: string) => (path.includes('.companion') ? path.slice(path.indexOf('.companion')) : path)
+// The engine hands an fs hook the path resolved against the working directory. The plugin's own
+// persona is served as prompts/persona.md, wherever the plugin sits.
+const relative = (path: string) =>
+  path.includes('.companion') ? path.slice(path.indexOf('.companion')) : path.endsWith('/prompts/persona.md') ? 'prompts/persona.md' : path
 
 const PROCESS_OK = { exitCode: 0, stderr: '', isStdoutTruncated: false, isStderrTruncated: false }
 
@@ -171,10 +174,26 @@ function engine(on: On, files: Record<string, string>, percent: number) {
     return { value: undefined }
   })
   let tokens: number | undefined
-  on('session.usage', () => ({ value: { startedAt: 0, context: { window: 200_000, percent, tokens }, rateLimits: [] } }))
-  on('command.register', () => ({ value: undefined }) as never)
+  let failNextUsage = false
+  on('session.usage', () => {
+    if (failNextUsage) {
+      failNextUsage = false
+      throw new Error('usage unavailable')
+    }
+    return { value: { startedAt: 0, context: { window: 200_000, percent, tokens }, rateLimits: [] } }
+  })
+  const commands: string[] = []
+  on('command.register', ($, e) => (commands.push(`${e.name}: ${e.description}`), { value: undefined }) as never)
   const tools: string[] = []
-  on('tool.register', ($, e) => (tools.push(e.name), { value: { tool: `mcp__watchmen__${e.name}` } }))
+  let failNextRegister = false
+  on('tool.register', ($, e) => {
+    if (failNextRegister) {
+      failNextRegister = false
+      throw new Error('register refused')
+    }
+    tools.push(e.name)
+    return { value: { tool: `mcp__watchmen__${e.name}` } }
+  })
   const cleared: string[] = []
   on('env.set', ($, e) => (cleared.push(e.name), { value: undefined }) as never)
   const status: (string | undefined)[] = []
@@ -188,6 +207,7 @@ function engine(on: On, files: Record<string, string>, percent: number) {
   let draft = ''
   on('prompt.read', () => ({ value: { text: draft, cursor: draft.length } }))
   const prompts: string[] = []
+  const asUser: string[] = []
   let submitGate: Promise<void> | undefined
   let failNextSubmit = false
   on('prompt.submit', async ($, e) => {
@@ -197,6 +217,7 @@ function engine(on: On, files: Record<string, string>, percent: number) {
       throw new Error('submit refused')
     }
     prompts.push(e.text)
+    if (e.origin.kind === 'plugin' && e.origin.asUser) asUser.push(e.text)
     return { text: e.text } as never
   })
   const logs: string[] = []
@@ -220,6 +241,7 @@ function engine(on: On, files: Record<string, string>, percent: number) {
   })
   return {
     clock,
+    commands,
     status,
     toasts,
     cleared,
@@ -231,6 +253,9 @@ function engine(on: On, files: Record<string, string>, percent: number) {
     addFile: (path: string, text: string) => (files[path] = text),
     setDraft: (text: string) => (draft = text),
     failNextSubmit: () => (failNextSubmit = true),
+    failNextUsage: () => (failNextUsage = true),
+    failNextRegister: () => (failNextRegister = true),
+    asUser,
     holdSubmit: () => {
       let release = () => {}
       submitGate = new Promise(resolve => (release = resolve))
@@ -268,6 +293,110 @@ test('stays silent when the session was not launched as watchmen', async ($, on)
   expect(seen.status).toEqual([])
   expect(seen.tools).toEqual([])
   expect(seen.runs).toEqual([])
+  // Only /watchmen, which says how to start.
+  expect(seen.commands).toEqual(['watchmen: Start the watch in this session: /watchmen start'])
+})
+
+const BOARD_TOOLS = ['board_track', 'board_move', 'board_drop', 'board_changes']
+const NOT_WATCH = 'Watchmen is not keeping the watch in this session.'
+
+test('outside the watch the board tools are refused and /watchmen says how to start', async ($, on) => {
+  mock.env(on, {})
+  const seen = engine(on, {}, 10)
+  await $.session.start(START)
+  await seen.clock.settle()
+  expect((await $.tool.call({ tool: 'mcp__watchmen__board_track', title: 'x' })).deny).toBe(NOT_WATCH)
+  expect((await $.tool.call({ tool: 'mcp__watchmen__board_changes' })).deny).toBe(NOT_WATCH)
+  for (const args of ['', 'brief', 'track a todo', 'approve a 0123', 'reset']) {
+    expect((await $.command.run(typed(args))).text).toBe(`${NOT_WATCH} Type /watchmen start to make this session the watch.`)
+  }
+  expect(seen.writes['.companion/board.json']).toBeUndefined()
+  // The model or another plugin cannot make a session the watch.
+  const byPlugin = await $.command.run({ ...typed('start'), origin: { kind: 'plugin', name: 'other' } } as never)
+  expect(byPlugin.text).toContain('Only you can start the watch')
+  expect(seen.tools).toEqual([])
+  expect(seen.prompts).toEqual([])
+})
+
+test('/watchmen start makes a session that was not launched the watch: state, tools, pane and briefing', async ($, on) => {
+  mock.env(on, { HOME: '/home/u' })
+  const seen = engine(
+    on,
+    {
+      '.companion/board.json': serialize([{ id: 'deck', title: 'Deck review', lane: 'needs-you' }]),
+      '.companion/handoff-2026-11-20.md': 'last',
+      'prompts/persona.md': 'You are the watch: PERSONA.\n',
+      '/home/u/.claude/skills/ambient-companion/SKILL.md': '# skill',
+    },
+    10,
+  )
+  await $.session.start(START)
+  await seen.clock.settle()
+  expect(seen.tools).toEqual([])
+
+  // The desktop app's sessions are SDK-hosted: the person's typing arrives as `sdk` there.
+  const started = await $.command.run({ ...typed('start'), origin: { kind: 'sdk' } } as never)
+  expect(started.text).toBe('This session keeps the watch now. The briefing goes in as the first message.')
+  await seen.clock.settle()
+
+  expect(seen.tools).toEqual(BOARD_TOOLS)
+  expect(seen.commands.at(-1)).toContain('watchmen: The watch: open the board')
+  expect(seen.opened).toEqual(['board'])
+  expect(seen.logs).toEqual([])
+  expect(seen.prompts).toHaveLength(1)
+  // The person typed /watchmen start, so the briefing reads as their own words.
+  expect(seen.asUser).toEqual(seen.prompts)
+  const brief = seen.prompts[0] ?? ''
+  expect(brief.startsWith('You are the watch: PERSONA.\n\n')).toBe(true)
+  expect(brief).toContain('ambient-companion skill at /home/u/.claude/skills/ambient-companion/SKILL.md')
+  expect(brief).toContain('Agent tool and model "opus"')
+  expect(brief).toContain('.companion/about-you.md')
+  expect(brief).toContain('handoff at .companion/handoff-2026-11-20.md')
+
+  // The watch is kept in state, the board was loaded, and the tools work now.
+  const report = (await $.command.run(typed(''))).text ?? ''
+  expect(report).toContain('handoff: .companion/handoff-2026-11-20.md')
+  expect(report).toContain('skill:   /home/u/.claude/skills/ambient-companion/SKILL.md')
+  expect(report).toContain('Deck review')
+  seen.opened.length = 0
+  expect((await $.tool.call({ tool: 'mcp__watchmen__board_track', title: 'New thing' })).result).toBe('Tracked. 2 items on the board.')
+
+  // A second start keeps the one watch: no second briefing, the pane brought back.
+  expect((await $.command.run(typed('start'))).text).toBe('This session already keeps the watch.')
+  await seen.clock.settle()
+  expect(seen.prompts).toHaveLength(1)
+  expect(seen.opened).toEqual(['board'])
+})
+
+test('a start that fails half way leaves no watch behind, and the next start works', async ($, on) => {
+  mock.env(on, { HOME: '/home/u' })
+  const seen = engine(on, { 'prompts/persona.md': 'P' }, 10)
+  await $.session.start(START)
+  await seen.clock.settle()
+  seen.failNextRegister()
+  expect((await $.command.run(typed('start'))).text).toContain('The watch could not start')
+  await seen.clock.settle()
+  expect(seen.prompts).toEqual([])
+  expect(seen.commands.at(-1)).toBe('watchmen: Start the watch in this session: /watchmen start')
+  expect((await $.tool.call({ tool: 'mcp__watchmen__board_track', title: 'x' })).deny).toBe(NOT_WATCH)
+  expect((await $.command.run(typed('start'))).text).toBe('This session keeps the watch now. The briefing goes in as the first message.')
+  await seen.clock.settle()
+  expect(seen.tools).toEqual(BOARD_TOOLS)
+  expect(seen.prompts).toHaveLength(1)
+})
+
+test('the briefing is the launcher\'s: persona, skill, task model, about-you, handoff', () => {
+  const text = briefing({ persona: 'P\n', taskModel: 'opus' })
+  const parts = text.split('\n\n')
+  expect(parts[0]).toBe('P')
+  expect(parts[1]).toContain('skill was not found')
+  expect(parts[2]).toContain('model "opus"')
+  expect(parts[3]).toContain('.companion/about-you.md')
+  expect(parts[4]).toContain('There is no handoff')
+  expect(pickModel('fable', 'opus')).toBe('fable')
+  expect(pickModel('x"; rm', 'opus')).toBe('opus')
+  expect(skillCandidates('/h', '')).toEqual(['/h/.claude/skills/ambient-companion/SKILL.md', '/h/.agents/skills/ambient-companion/SKILL.md'])
+  expect(skillCandidates(undefined, '/s/SKILL.md')).toEqual(['/s/SKILL.md'])
 })
 
 test('a check never runs until the human approves its command, and the model cannot approve it', async ($, on) => {
@@ -351,6 +480,18 @@ test('as watchmen: an approved check runs on its interval and flags a change', a
   await seen.clock.advance(5 * MIN)
   expect(seen.toasts.length).toBe(toasts + 1)
   expect(savedBoard(seen)[0]?.last).toBe(head)
+})
+
+test('a first tick that fails still leaves the check timer running', async ($, on) => {
+  mock.env(on, { WATCHMEN: '1' })
+  const seen = engine(on, { '.companion/board.json': serialize([{ ...JIRA, check: { argv: ['acli', 'jira'], everyMs: MIN } }]) }, 10)
+  seen.failNextUsage()
+  await $.session.start(START)
+  await seen.clock.settle()
+  expect(seen.logs.some(line => line.includes('tick failed'))).toBe(true)
+  await $.command.run(typed(`approve ABC-1 ${savedBoard(seen)[0]?.approvalHash}`))
+  await seen.clock.advance(15_000)
+  expect(seen.runs).toEqual([['acli', 'jira']])
 })
 
 test('a slow check is never started a second time while the first still runs', async ($, on) => {
@@ -659,12 +800,45 @@ const BAND_BOARD = serialize([
   { id: 'w2', title: 'W2', lane: 'waiting' },
 ])
 
+test('the widget glance: the counts, then what needs you first, else what changed, else quiet', () => {
+  const quiet = glance([{ id: 'm', title: 'M', lane: 'moving' }])
+  expect(quiet).toEqual({ counts: '0 need you · 1 moving · 0 waiting', first: 'Nothing needs you.', isNeedsYou: false })
+  expect(glance([{ id: 'm', title: 'M', lane: 'moving', isChanged: true }]).first).toBe('changed: M')
+  const needs = glance([{ id: 'm', title: 'M', lane: 'moving', isChanged: true }, { id: 'd', title: 'Deck\n', lane: 'needs-you', note: 'review' }])
+  expect(needs).toMatchObject({ first: 'Deck : review', isNeedsYou: true })
+})
+
+test('seated as a desktop widget, the pane draws the glance instead of the board', async ($, on) => {
+  mock.env(on, { WATCHMEN: '1' })
+  const seen = engine(
+    on,
+    { '.companion/board.json': serialize([{ id: 'd', title: 'Deck review', lane: 'needs-you' }, { id: 'm', title: 'Slice 2', lane: 'moving' }]) },
+    10,
+  )
+  await $.session.start(START)
+  await seen.clock.settle()
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const pane = await $.ui.mount({
+      plugin: 'watchmen',
+      surface,
+      component: 'Pane',
+      requestId: 'board',
+      props: { title: '⚛ watchmen', isFocused: false, bodyColumns: 40, placement: 'widget', scroll: { offset: 0, bodyRows: 3 }, view: {} },
+    })
+    const text = JSON.stringify(await pane.drawn())
+    expect(text).toContain('1 need you · 1 moving · 0 waiting')
+    expect(text).toContain('Deck review')
+    expect(text).not.toContain('Slice 2')
+    expect(text).not.toContain('Needs you (')
+  }
+})
+
 function mountBand($: Engine, bodyColumns: number) {
   return $.ui.mount({
     plugin: 'watchmen',
     surface: 'terminal',
     component: 'AbovePrompt',
-    props: { hasSurvey: false, isWorking: false, maxRows: 3, bodyColumns, scroll: { offset: 0, bodyRows: 3 }, view: {} },
+    props: { hasSurvey: false, isCollapsed: false, isWorking: false, maxRows: 3, bodyColumns, scroll: { offset: 0, bodyRows: 3 }, view: {} },
   })
 }
 

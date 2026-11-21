@@ -6,7 +6,11 @@
 
 > *Quis custodiet ipsos custodes?* Who watches the watchmen? Here: you do, through the charter.
 
-An assistant session that runs beside your working sessions and keeps track of everything going on: the tickets you own, the merge requests waiting on review, the worker sessions implementing slices, the todos you handed it. It tells you what needs you, what is moving, and what is waiting, and stays quiet otherwise.
+**Tell it what to watch. It tells you what needs you.**
+
+watchmen is an assistant for your work. You hand it what to keep an eye on: a merge request, a review comment, a worker session, a ticket, a todo. It keeps the list, checks each item, and comes back to you only when something needs you; the rest it sorts into what is moving and what is waiting, and stays quiet. It remembers how you like to hear from it. The board is what it looks after; the charter is how far you trust it.
+
+It runs as one session beside your working ones, in a terminal or in the Claude desktop app.
 
 ```
  your work sessions                    watchmen (always open, beside them)
@@ -41,18 +45,34 @@ cd <your workspace>
 watchmen
 ```
 
-Or install the plugin from this repository as a marketplace; the launcher is still what starts the watch:
+Or install the plugin from this repository as a marketplace; then start the watch with the launcher, or with `/watchmen start` in any session (see On the desktop):
 
 ```
 /plugin marketplace add pelayomendez/watchmen
 /plugin install watchmen@pelayomendez-watchmen
 ```
 
-The launcher starts a session named `watchmen`, briefs it with the persona, the newest `.companion/handoff-*.md` and where the skill lives, and loads this plugin. The plugin stays silent in every session the launcher did not start, so it is safe to install globally.
+The launcher starts a session named `watchmen`, briefs it with the persona, the newest `.companion/handoff-*.md`, where the skill lives and where your preferences are kept, and loads this plugin. In every other session the plugin only offers `/watchmen start`, so it is safe to install globally.
 
 `WATCHMEN_PRINT_BRIEFING=1 watchmen` prints the briefing without starting a session.
 
 **Models.** The watch stays on all day, so it runs on `sonnet`; a task you ask it to perform goes to a subagent on `opus`, and only that subagent costs the stronger model. `WATCHMEN_MODEL` and `WATCHMEN_TASK_MODEL` (`haiku`, `sonnet`, `opus`, `fable`) change them.
+
+## On the desktop
+
+The Claude desktop app cannot run the launcher, so the watch starts from inside a session there:
+
+1. Install the plugin: `/plugin marketplace add pelayomendez/watchmen`, then `/plugin install watchmen@pelayomendez-watchmen` (and the `ambient-companion` skill, as above).
+2. Open a session in your workspace folder, the one whose `.companion/` holds the board and the handoffs.
+3. Type `/watchmen start`.
+
+That session becomes the watch: it loads the board, opens the board pane, and sends the launcher's briefing as its first message. It runs on the model you picked in the app, and still hands real tasks to an `opus` subagent. Minimize the pane and it stays on screen as a widget: the mascot, the lane counts and the first thing that needs you. The model and other plugins cannot start the watch: `/watchmen start` is refused unless it is typed.
+
+**Approving checks.** `/watchmen approve <id> <hash>` counts only when you type it in a terminal session or through Remote Control. Typing it in the desktop app may not count until that has been confirmed, so approve new checks from a terminal (`claude` in the same workspace) for now; the approval holds for the workspace, so the desktop watch runs the check from then on.
+
+## It remembers you
+
+The watch keeps your standing preferences in `.companion/about-you.md`, one line each: "CI flakes don't matter", "comments from the design team do", "brief me at 9 in three lines". It reads the file when the watch begins, and adds or edits a line when you correct how it reports or tell it what matters to you. It never writes secrets, credentials or anything about other people there. The file is yours: edit it by hand whenever you like.
 
 ## The board
 
@@ -89,11 +109,11 @@ The model's tools are `board_track`, `board_move`, `board_drop` and `board_chang
 - **The band**: one slim row above the prompt in the watch session: the mascot, the lane counts (needs you in red, moving in cyan, waiting dim), and two buttons, `board` (opens the board pane; Escape closes it) and `hide` (hidden until `/watchmen band` or the next session). It shortens its words, then drops the buttons and the other counts, as the terminal narrows.
 - **The mascot**: a hydrogen atom, one nucleus, one orbit, one electron (`assets/atom.svg`, drawn for this project), coloured by state: blue when calm, the electron amber when something changed, red when something needs you. Surfaces that draw SVG (the desktop app, the editor) show the picture; a terminal has no SVG element, so there it is the `⚛` glyph in the state's colour.
 
-- **The pane**, `⚛ watchmen`: the lanes with their items, changed ones marked ◆ and bold. It opens by itself beside the transcript in the fullscreen layout; on the main screen, `/watchmen` opens it.
+- **The pane**, `⚛ watchmen`: the lanes with their items, changed ones marked ◆ and bold. It opens by itself beside the transcript in the fullscreen layout; on the main screen, `/watchmen` opens it. Minimized on the desktop app it becomes a widget: the mascot, the counts and the first thing that needs you.
 - **The watch's own figures**, dim at the end of the band: `42% · idle 12m`, its context fill and how long since its last turn. At 75% they turn into `write the handoff`.
 - **Rotation.** The prompt cache lasts an hour; a wake after that pays to cache the whole conversation again. So when the watch has been idle 50 minutes and its conversation has grown 40k tokens past its fresh start, it writes its handoff, the conversation is cleared, and it resumes from that handoff: the next wake finds a small conversation. A turn that wrote no handoff, or a refused clear, leaves the watch as it was.
 - **Toasts**: one when an item changes, one when the watch runs long.
-- **`/watchmen`** opens the pane and prints the board; `/watchmen brief` prints it grouped by lane; `/watchmen band` shows a hidden band again; `/watchmen track <title>` adds a todo to needs-you; `/watchmen approve <id> <hash>` lets an item's check run; `/watchmen reload` and `/watchmen reset` recover from an unreadable board.json.
+- **`/watchmen`** opens the pane and prints the board (outside the watch, `/watchmen start` makes the session the watch); `/watchmen brief` prints it grouped by lane; `/watchmen band` shows a hidden band again; `/watchmen track <title>` adds a todo to needs-you; `/watchmen approve <id> <hash>` lets an item's check run; `/watchmen reload` and `/watchmen reset` recover from an unreadable board.json.
 
 ## The board outside Claude
 
@@ -108,7 +128,7 @@ The repo is also a [herdr](https://herdr.dev) plugin (macOS and Linux, herdr 0.9
 Install it from GitHub (pin a release with `--ref`), or link a clone. The install checks that node and claude are there and installs nothing:
 
 ```bash
-herdr plugin install pelayomendez/watchmen --ref v0.2.0
+herdr plugin install pelayomendez/watchmen --ref v0.3.0
 herdr plugin link ~/path/to/watchmen
 ```
 
@@ -164,15 +184,16 @@ A secondary action, `pelayomendez.watchmen.toggle-board`, opens the read-only bo
 | Path | What |
 |---|---|
 | `bin/watchmen` | Launcher: finds the skill and the newest handoff, builds the briefing, starts the session |
+| `hooks/briefing.ts` | The same briefing, built in the module for `/watchmen start` |
 | `prompts/persona.md` | Who the watch is, and how it triages the board |
 | `hooks/board.ts` | The board's rules: tracking, checks, change detection, lanes |
-| `hooks/register.tsx` | Wiring: state, timer, checks, tools, `/watchmen`, the pane, the band, rotation |
+| `hooks/register.tsx` | Wiring: state, timer, checks, tools, `/watchmen` and `/watchmen start`, the pane and its widget, the band, rotation |
 | `hooks/watchmen.test.ts` | `claude plugin test .` |
 | `bin/watchmen-board`, `bin/board-render.mjs` | The read-only board viewer and its pure rendering |
 | `herdr-plugin.toml`, `scripts/herdr-*` | The herdr plugin: install check, summon the session, toggle the board list |
 | `test/*.test.mjs` | `node --test test/*.test.mjs` |
 
-Why the persona is in the launcher and not the plugin: Claude Code's built-in security plugin bypasses a user-installed plugin's changes to the system prompt, so the launcher passes it with `--append-system-prompt`.
+Why the persona is not in the system prompt through the plugin: Claude Code's built-in security plugin bypasses a user-installed plugin's changes to the system prompt, so the launcher passes it with `--append-system-prompt`, and `/watchmen start` sends it as the session's first message.
 
 ## Update and uninstall
 

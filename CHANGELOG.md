@@ -2,6 +2,17 @@
 
 Releases are tagged `watchmen--v<version>` (Claude Code) and `v<version>` (herdr `--ref`).
 
+## 0.3.0
+
+watchmen as your assistant, on the desktop too.
+
+- `/watchmen start` makes any session the watch, the Claude desktop app's included: it loads the board, opens the pane and sends the launcher's briefing as the first message. The session keeps the model picked there. It cannot be started by the model or another plugin.
+- Check approvals (`/watchmen approve`) are still typed in a terminal session or through Remote Control; typing them in the desktop app may not count until that is confirmed.
+- `/watchmen` is offered in every session; outside the watch it only says how to start, and the board tools stay off.
+- The board pane draws a glance when the desktop app seats it as a widget: the mascot, the lane counts and the first thing that needs you.
+- The watch remembers you in `.companion/about-you.md`: it reads it at the start and adds a line when you correct how it reports. It never records secrets, credentials or details about other people.
+- The README leads with the assistant ("Tell it what to watch. It tells you what needs you.") and has an "On the desktop" section.
+
 ## 0.2.0
 
 First release.
