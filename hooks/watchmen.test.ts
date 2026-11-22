@@ -635,6 +635,28 @@ test('approve all refuses when a check changed between the list and the approval
   expect(seen.runs).toEqual([])
 })
 
+test('/watchmen start opens no pane on VS Code', async ($, on) => {
+  mock.env(on, {})
+  const seen = engine(on, {}, 10)
+  await $.session.start(START)
+  await seen.clock.settle()
+  seen.setSurfaces(['vscode'])
+  await $.command.run({ ...typed('start'), origin: { kind: 'sdk' } } as never)
+  await seen.clock.settle()
+  expect(seen.opened).toEqual([])
+})
+
+test('/watchmen start opens no pane in a terminal with a phone attached', async ($, on) => {
+  mock.env(on, {})
+  const seen = engine(on, {}, 10)
+  seen.setSurfaces(['terminal', 'mobile'])
+  await $.session.start(START)
+  await seen.clock.settle()
+  await $.command.run(typed('start'))
+  await seen.clock.settle()
+  expect(seen.opened).toEqual([])
+})
+
 test('the briefing is the launcher\'s: persona, skill, task model, about-you, handoff', () => {
   const text = briefing({ persona: 'P\n', taskModel: 'opus' })
   const parts = text.split('\n\n')

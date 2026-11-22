@@ -887,11 +887,11 @@ export const register: Register = on => {
       } catch (error) {
         return { text: `The watch could not start: ${String(error)}. Type /watchmen start to try again.` }
       }
-      // Less board, more conversation: on the desktop app the pane starts as a small widget; in a
-      // terminal it is not opened at all (the band shows the counts, /watchmen opens it, and the
-      // fullscreen layout still docks it by itself).
-      const surfaces = await $.session.surfaces().catch(() => [] as const)
-      if (surfaces.some(surface => surface !== 'terminal')) {
+      // Less board, more conversation: on the desktop app the pane starts as a small widget; on any
+      // other surface (a terminal, VS Code, a phone) it is not opened at all: the band shows the
+      // counts, /watchmen opens it, and the fullscreen layout still docks it by itself.
+      const surfaces: readonly string[] = await $.session.surfaces().catch(() => [])
+      if (surfaces.includes('desktop')) {
         await $.ui.open({ id: PANE, title: PANE_TITLE, placement: 'widget' }).catch(() => undefined)
       }
       // The briefing is the watch's first message. A command.run hook cannot submit a prompt (it
