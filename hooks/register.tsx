@@ -38,6 +38,21 @@ import {
 } from './board'
 import type { CheckOutcome, CheckResult, ItemPatch } from './board'
 import { briefing, pickModel, skillCandidates } from './briefing'
+import {
+  DISCOVERY_TIMEOUT_MS,
+  foundSection,
+  glabReviewLookup,
+  LOOKUPS,
+  notOnBoard,
+  parseGh,
+  parseGlab,
+  parseJira,
+  projectDirName,
+  RECENT_SESSION_MS,
+  recentSessions,
+  usernameOf,
+} from './discover'
+import type { Found } from './discover'
 
 // Watchmen keeps the watch in one session: the one the launcher starts (WATCHMEN=1, the briefing
 // as --append-system-prompt), or one where the person types /watchmen start (the desktop app can
@@ -594,6 +609,73 @@ async function findSkill($: EngineInterface): Promise<string | undefined> {
   }
 }
 
+/** Whether a CLI is installed, by a cheap `which`. */
+async function hasCli($: EngineInterface, name: string): Promise<boolean> {
+  try {
+    return (await $.process.run(['which', name], { timeoutMs: 3_000 })).exitCode === 0
+  } catch {
+    return false
+  }
+}
+
+/** One read-only lookup's output, or nothing when it failed or ran out of time. */
+async function lookup($: EngineInterface, argv: readonly string[]): Promise<string> {
+  try {
+    const run = await $.process.run([...argv], { timeoutMs: DISCOVERY_TIMEOUT_MS })
+    return run.exitCode === 0 ? run.stdout : ''
+  } catch {
+    return ''
+  }
+}
+
+/** The Claude sessions whose transcripts changed in the last three hours, here or below. */
+async function recentClaudeSessions($: EngineInterface): Promise<{ count: number; folders: string[] }> {
+  const none = { count: 0, folders: [] }
+  try {
+    const home = (await $.env.get('HOME')) || undefined
+    if (!home) return none
+    const cwd = await $.session.cwd()
+    const root = `${home}/.claude/projects`
+    if (!(await $.fs.exists(root))) return none
+    const own = projectDirName(cwd)
+    const dirs = (await $.fs.list(root)).filter(one => one.kind === 'dir' && (one.name === own || one.name.startsWith(`${own}-`)))
+    const listed = await Promise.all(
+      dirs.map(async dir => ({
+        name: dir.name,
+        mtimes: (await $.fs.list(`${root}/${dir.name}`).catch(() => [])).filter(one => one.kind === 'file' && one.name.endsWith('.jsonl')).map(one => one.mtimeMs),
+      })),
+    )
+    return recentSessions(cwd, listed, (await $.clock.now()) - RECENT_SESSION_MS)
+  } catch {
+    return none
+  }
+}
+
+/**
+ * First-run discovery: the fixed, read-only lookups (discover.ts), each only where its CLI is
+ * installed, failures ignored. Answers the briefing's "Found" section, or undefined.
+ */
+async function discover($: EngineInterface): Promise<string | undefined> {
+  const [gh, glab, acli] = await Promise.all(['gh', 'glab', 'acli'].map(name => hasCli($, name)))
+  const jobs: Promise<Found[]>[] = []
+  if (gh) {
+    jobs.push(lookup($, LOOKUPS.ghAuthored).then(out => parseGh(out, 'author')))
+    jobs.push(lookup($, LOOKUPS.ghReview).then(out => parseGh(out, 'reviewer')))
+  }
+  if (glab) {
+    jobs.push(lookup($, LOOKUPS.glabAuthored).then(out => parseGlab(out, 'author')))
+    jobs.push(
+      lookup($, LOOKUPS.glabUser).then(async out => {
+        const argv = glabReviewLookup(usernameOf(out))
+        return argv ? parseGlab(await lookup($, argv), 'reviewer') : []
+      }),
+    )
+  }
+  if (acli) jobs.push(lookup($, LOOKUPS.jira).then(parseJira))
+  const found = (await Promise.all(jobs)).flat()
+  return foundSection(notOnBoard(found, await read($, board)), await recentClaudeSessions($))
+}
+
 /** The briefing for /watchmen start: the launcher's, built here from the plugin's own persona. */
 async function startBriefing($: EngineInterface, watch: Watch): Promise<string> {
   const persona = await $.fs.read(`${$.plugin.root}/prompts/persona.md`).catch(() => '')
@@ -612,7 +694,16 @@ export const register: Register = on => {
       await $.command.register(COMMAND_IDLE)
       return result
     }
+    const isNew = !(await isWatch($))
     await startWatch($, (await $.env.get('WATCHMEN_SKILL')) || undefined)
+    // The launcher's briefing is a system prompt built in bash; what discovery finds goes in as a
+    // message of its own, once the session is up.
+    if (isNew) {
+      $.clock.after(0, async () => {
+        const found = await discover($).catch(() => undefined)
+        if (found) void $.prompt.submit({ text: found }).catch(error => $.ui.log(`watchmen: what discovery found was not sent: ${String(error)}`))
+      })
+    }
     await $.env.set('WATCHMEN', undefined)
     await $.env.set('WATCHMEN_SKILL', undefined)
     return result
@@ -686,9 +777,12 @@ export const register: Register = on => {
       // would wait on the turn the hook holds), so a timer sends it once the command has answered;
       // the engine starts that turn when the session is idle, the board tools registered above in it.
       // The person typed /watchmen start, so the model reads the briefing as their own words.
+      // Discovery runs in that timer too, and what it finds ends the briefing.
       const text = await startBriefing($, started)
-      $.clock.after(0, () => {
-        void $.prompt.submit({ text, asUser: true }).catch(error => $.ui.log(`watchmen: the briefing was not sent: ${String(error)}`))
+      $.clock.after(0, async () => {
+        const found = await discover($).catch(() => undefined)
+        const full = found ? `${text}\n\n${found}` : text
+        void $.prompt.submit({ text: full, asUser: true }).catch(error => $.ui.log(`watchmen: the briefing was not sent: ${String(error)}`))
       })
       return { text: 'This session keeps the watch now. The briefing goes in as the first message.' }
     }
@@ -704,6 +798,20 @@ export const register: Register = on => {
       // /watchmen approve is refused, so a planted or injected check cannot approve itself.
       if (e.origin.kind !== 'composer' && e.origin.kind !== 'bridge') {
         return { text: 'Only you can approve a check: type /watchmen approve <id> <hash> yourself.' }
+      }
+      // approve all: every check not yet approved, each command shown in the answer; the approval
+      // is for exactly the argv read here, as with one approve.
+      if (rest[0] === 'all' && rest.length === 1) {
+        const lines: string[] = []
+        for (const item of await read($, board)) {
+          if (!item.check || item.lane === 'done' || (await isApproved($, item.check.argv))) continue
+          await $.store.set(await approvalKey($, item.check.argv), true)
+          await setAwaiting($, item.id, undefined)
+          lines.push(`  ${item.id}: ${sanitize(JSON.stringify(item.check.argv))}`)
+        }
+        if (lines.length === 0) return { text: 'No check is waiting for approval.' }
+        await save($)
+        return { text: [`Approved for this workspace (${lines.length}):`, ...lines].join('\n') }
       }
       const item = (await read($, board)).find(one => one.id === rest[0])
       if (!item?.check) return { text: `No item "${rest[0] ?? ''}" with a check on the board.` }

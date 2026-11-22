@@ -6,6 +6,7 @@ import type { Item } from '../types'
 import { applyCheck, applyToBoard, approvalLines, attempt, dueChecks, enteredNeedsYou, glance, MASCOT_COLORS, mascotState, paintAtom, queueWake, SIDEBAR_ROW, sidebarToken, sidebarTokens, wakePrompt, move, parse, parseBoard, serialize, vitals, isRotationDue, ROTATE_IDLE_MS, ROTATE_PROMPT, summary, track } from './board'
 import { newestBackupOf, newestHandoff } from './register'
 import { briefing, pickModel, skillCandidates } from './briefing'
+import { foundSection, glabReviewLookup, notOnBoard, parseGh, parseGlab, parseJira, projectDirName, recentSessions } from './discover'
 
 const MIN = 60_000
 
@@ -225,6 +226,9 @@ function engine(on: On, files: Record<string, string>, percent: number) {
   const notices: string[] = []
   on('ui.notify', ($, e) => (notices.push(e.text), { value: { isSent: true, channel: 'terminal_bell' } }) as never)
   const runs: string[][] = []
+  const lookups: string[][] = []
+  const clis = new Set<string>()
+  const lookupOutputs: Record<string, string> = {}
   let output = 'In Progress'
   let gate: Promise<void> | undefined
   on('process.run', async ($, e) => {
@@ -234,6 +238,15 @@ function engine(on: On, files: Record<string, string>, percent: number) {
       writes[relative(to!)] = writes[relative(from!)]!
       delete writes[relative(from!)]
       return { value: { ...PROCESS_OK, stdout: '' } }
+    }
+    // Discovery: `which` answers from the CLIs the test installed, and the lookups are kept apart
+    // from the checks' runs.
+    if (e.argv[0] === 'which') return { value: { ...PROCESS_OK, exitCode: clis.has(e.argv[1]!) ? 0 : 1, stdout: '' } }
+    const line = e.argv.join(' ')
+    if (line.startsWith('gh search ') || line.startsWith('glab api ') || line.startsWith('acli jira workitem search')) {
+      lookups.push([...e.argv])
+      const answer = Object.entries(lookupOutputs).find(([prefix]) => line.startsWith(prefix))?.[1]
+      return { value: { ...PROCESS_OK, stdout: answer ?? '[]' } }
     }
     runs.push([...e.argv])
     if (gate) await gate
@@ -254,6 +267,8 @@ function engine(on: On, files: Record<string, string>, percent: number) {
     setDraft: (text: string) => (draft = text),
     failNextSubmit: () => (failNextSubmit = true),
     failNextUsage: () => (failNextUsage = true),
+    lookups,
+    install: (name: string, outputs: Record<string, string> = {}) => (clis.add(name), Object.assign(lookupOutputs, outputs)),
     failNextRegister: () => (failNextRegister = true),
     asUser,
     holdSubmit: () => {
@@ -383,6 +398,95 @@ test('a start that fails half way leaves no watch behind, and the next start wor
   await seen.clock.settle()
   expect(seen.tools).toEqual(BOARD_TOOLS)
   expect(seen.prompts).toHaveLength(1)
+})
+
+const GH_PR = (repo: string, number: number, title: string) => ({ number, title, url: `https://github.com/${repo}/pull/${number}`, repository: { nameWithOwner: repo } })
+
+test('discovery parses what the lookups answer, cleans titles, and skips what is on the board', () => {
+  const gh = parseGh(JSON.stringify([GH_PR('o/r', 7, 'Fix\x1b[2J it\nnow'), { title: 'no number' }]), 'author')
+  expect(gh).toEqual([{ kind: 'github-pr', id: 'o/r#7', title: 'Fix[2J it now', link: 'https://github.com/o/r/pull/7', role: 'author' }])
+  expect(parseGh('not json', 'author')).toEqual([])
+  const glab = parseGlab(JSON.stringify([{ iid: 42, title: 'Frames', web_url: 'https://g/x/-/merge_requests/42', references: { full: 'grp/proj!42' } }]), 'reviewer')
+  expect(glab[0]).toMatchObject({ kind: 'gitlab-mr', id: 'grp/proj!42', role: 'reviewer' })
+  expect(parseJira(JSON.stringify([{ key: 'ABC-1', fields: { summary: 'Frames' } }, { key: 'bad key', summary: 'x' }]))).toEqual([
+    { kind: 'jira', id: 'ABC-1', title: 'Frames', role: 'assignee' },
+  ])
+  expect(parseJira(JSON.stringify({ issues: [{ key: 'ABC-2', summary: 'S' }] }))[0]?.id).toBe('ABC-2')
+  expect(glabReviewLookup('pelayo.m')).toEqual(['glab', 'api', 'merge_requests?state=opened&scope=all&reviewer_username=pelayo.m&per_page=10'])
+  expect(glabReviewLookup('x&scope=all')).toBeUndefined()
+  const board: Item[] = [{ id: 'ABC-1', title: 'Frames', lane: 'moving' }, { id: 'pr', title: 'PR', lane: 'waiting', link: 'https://github.com/o/r/pull/7' }]
+  expect(notOnBoard([...gh, ...gh, ...glab, ...parseJira('[{"key":"ABC-1","summary":"F"}]')], board).map(one => one.id)).toEqual(['grp/proj!42'])
+  expect(notOnBoard(Array.from({ length: 20 }, (_, at) => ({ kind: 'jira' as const, id: `A-${at}`, title: 't', role: 'assignee' as const })), [])).toHaveLength(15)
+  expect(foundSection([], { count: 0, folders: [] })).toBeUndefined()
+})
+
+test('recent Claude sessions: this folder and those below it, by transcript time only', () => {
+  expect(projectDirName('/Users/me/work.space')).toBe('-Users-me-work-space')
+  const dirs = [
+    { name: '-w', mtimes: [100, 5] },
+    { name: '-w-api', mtimes: [200] },
+    { name: '-w-old', mtimes: [1] },
+    { name: '-wx', mtimes: [300] },
+  ]
+  expect(recentSessions('/w', dirs, 50)).toEqual({ count: 2, folders: ['.', 'api'] })
+})
+
+test('/watchmen start ends the briefing with what discovery found, never what is on the board', async ($, on) => {
+  mock.env(on, { HOME: '/home/u' })
+  const seen = engine(on, { '.companion/board.json': serialize([{ id: 'o/r#1', title: 'Old', lane: 'waiting' }]), 'prompts/persona.md': 'P' }, 10)
+  seen.install('gh', {
+    'gh search prs --author': JSON.stringify([GH_PR('o/r', 1, 'Old'), GH_PR('o/r', 2, 'Mine')]),
+    'gh search prs --review-requested': JSON.stringify([GH_PR('t/s', 9, 'Theirs')]),
+  })
+  await $.session.start(START)
+  await seen.clock.settle()
+  await $.command.run(typed('start'))
+  await seen.clock.settle()
+  expect(seen.lookups.map(argv => argv.slice(0, 4).join(' '))).toEqual(['gh search prs --author', 'gh search prs --review-requested'])
+  const brief = seen.prompts[0] ?? ''
+  expect(brief).toContain('Found when the watch started')
+  expect(brief).toContain('- [github-pr] o/r#2 "Mine" (yours) https://github.com/o/r/pull/2')
+  expect(brief).toContain('- [github-pr] t/s#9 "Theirs" (review asked of you)')
+  expect(brief).not.toContain('"Old"')
+  expect(brief).toContain('github-pr: ["gh","pr","view"')
+  expect(brief).toContain('propose them to the human in one short message')
+  // Nothing found was put on the board, and no lookup ran a check.
+  expect(seen.writes['.companion/board.json']).toBeUndefined()
+  expect(seen.runs).toEqual([])
+})
+
+test('launched, what discovery found goes in as a message of its own; nothing found, nothing sent', async ($, on) => {
+  mock.env(on, { WATCHMEN: '1' })
+  const seen = engine(on, {}, 10)
+  seen.install('acli', { 'acli jira workitem search': JSON.stringify([{ key: 'ABC-7', fields: { summary: 'Import' } }]) })
+  await $.session.start(START)
+  await seen.clock.settle()
+  expect(seen.prompts).toHaveLength(1)
+  expect(seen.prompts[0]).toContain('- [jira] ABC-7 "Import" (assigned, in progress)')
+  expect(seen.lookups[0]).toContain("assignee = currentUser() AND statusCategory = 'In Progress'")
+})
+
+test('/watchmen approve all approves every waiting check, shows each command, and only for the person', async ($, on) => {
+  mock.env(on, { WATCHMEN: '1' })
+  const board = [
+    { ...JIRA, check: { argv: ['acli', 'jira'], everyMs: MIN } },
+    { id: 'mr', title: 'MR', lane: 'moving' as const, check: { argv: ['glab', 'mr'], everyMs: MIN } },
+    { id: 'old', title: 'Old', lane: 'done' as const, check: { argv: ['x'] } },
+  ]
+  const seen = engine(on, { '.companion/board.json': serialize(board) }, 10)
+  await $.session.start(START)
+  await seen.clock.settle()
+  const byPlugin = await $.command.run({ ...typed('approve all'), origin: { kind: 'plugin', name: 'other' } } as never)
+  expect(byPlugin.text).toContain('Only you can approve')
+  const approved = await $.command.run(typed('approve all'))
+  expect(approved.text).toBe('Approved for this workspace (2):\n  ABC-1: ["acli","jira"]\n  mr: ["glab","mr"]')
+  expect((await $.command.run(typed('approve all'))).text).toBe('No check is waiting for approval.')
+  await seen.clock.advance(15_000)
+  expect(seen.runs).toEqual([['acli', 'jira'], ['glab', 'mr']])
+  // A command changed afterwards needs approving again.
+  await $.tool.call({ tool: 'mcp__watchmen__board_track', id: 'mr', check: { argv: ['glab', 'mr', '--other'] } })
+  await seen.clock.advance(MIN)
+  expect(seen.runs.filter(argv => argv.includes('--other'))).toEqual([])
 })
 
 test('the briefing is the launcher\'s: persona, skill, task model, about-you, handoff', () => {
