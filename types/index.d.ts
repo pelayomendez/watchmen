@@ -21,6 +21,10 @@ export type Watch = {
   briefHour?: number
   /** The local day (YYYY-MM-DD) the watch last spoke first on, or started on past the brief hour. */
   lastBriefDay?: string
+  /** Set while /watchmen start's briefing has not gone in yet: no morning brief before it. */
+  isBriefingPending?: boolean
+  /** When the last morning brief failed to go in: the next try waits BRIEF_RETRY_MS. */
+  briefFailedAt?: number
   /** When the person last typed in the watch, and each item's lane then. */
   looked?: { at: number; lanes: Record<string, Lane> }
   /** What happened while they were away, shown in the band until they type again. */

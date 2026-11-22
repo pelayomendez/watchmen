@@ -443,6 +443,8 @@ async function maybeBrief($: EngineInterface, now: number) {
   const { day, hour } = localDay(now)
   const draft = (await $.prompt.read()).text
   const due = isBriefDue({
+    isBriefingPending: watch.isBriefingPending,
+    lastFailedAt: watch.briefFailedAt,
     day,
     hour,
     briefHour: watch.briefHour ?? 9,
@@ -457,9 +459,10 @@ async function maybeBrief($: EngineInterface, now: number) {
   isWaking = true
   try {
     await $.prompt.submit({ text: BRIEF_PROMPT })
-    await patchWatch($, held => ({ ...held, lastBriefDay: day, wake: { pending: held.wake?.pending ?? [], lastWakeAt: now } }))
+    await patchWatch($, held => ({ ...held, lastBriefDay: day, briefFailedAt: undefined, wake: { pending: held.wake?.pending ?? [], lastWakeAt: now } }))
   } catch (error) {
     $.ui.log(`watchmen: the morning brief was not sent: ${String(error)}`)
+    await patchWatch($, held => ({ ...held, briefFailedAt: now }))
   } finally {
     isWaking = false
   }
@@ -628,7 +631,7 @@ let isTicking = false
  * registered, and the check timer running. The launcher's session.start and /watchmen start both
  * come here. `skill` is where the ambient-companion skill was found, if it was.
  */
-async function startWatch($: EngineInterface, skill: string | undefined): Promise<Watch> {
+async function startWatch($: EngineInterface, skill: string | undefined, isBriefingPending = false): Promise<Watch> {
   const held = (await $.state.get(WATCH)).value
   // The command and the tools go in first and the watch is written to state last, so a start that
   // fails part way leaves no watch behind: /watchmen still offers start, and a retry runs it all.
@@ -648,6 +651,7 @@ async function startWatch($: EngineInterface, skill: string | undefined): Promis
     watch = {
       handoff: await latestHandoff($),
       briefHour,
+      ...(isBriefingPending ? { isBriefingPending } : {}),
       // Started past the brief hour, the watch's opening brief is today's.
       ...(today.hour >= briefHour ? { lastBriefDay: today.day } : {}),
       skill,
@@ -883,7 +887,7 @@ export const register: Register = on => {
       if (!STARTERS.includes(e.origin.kind)) return { text: 'Only you can start the watch: type /watchmen start yourself.' }
       let started: Watch
       try {
-        started = await startWatch($, await findSkill($))
+        started = await startWatch($, await findSkill($), true)
       } catch (error) {
         return { text: `The watch could not start: ${String(error)}. Type /watchmen start to try again.` }
       }
@@ -902,7 +906,11 @@ export const register: Register = on => {
       // never as the person's words: its titles come from other people.
       const text = await startBriefing($, started)
       $.clock.after(0, async () => {
-        void $.prompt.submit({ text, asUser: true }).catch(error => $.ui.log(`watchmen: the briefing was not sent: ${String(error)}`))
+        // The morning brief waits for this one; a failed briefing does not hold it back for good.
+        void $.prompt
+          .submit({ text, asUser: true })
+          .catch(error => $.ui.log(`watchmen: the briefing was not sent: ${String(error)}`))
+          .finally(() => patchWatch($, held => ({ ...held, isBriefingPending: undefined })))
         const found = await discover($).catch(() => undefined)
         if (found) void $.prompt.submit({ text: found }).catch(error => $.ui.log(`watchmen: what discovery found was not sent: ${String(error)}`))
       })

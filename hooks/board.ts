@@ -462,10 +462,16 @@ export function briefHourOf(value: string | undefined): number {
 }
 
 /**
- * Whether the morning brief is due: at or past the brief hour on a day not briefed yet, never over
- * a running turn, the person's typing or a rotation, and no sooner after a wake than wakes allow.
+ * Whether the morning brief is due: at or past the brief hour on a day not briefed yet, once the
+ * start briefing has gone in, never over a running turn, the person's typing or a rotation, no
+ * sooner after a wake than wakes allow, and not within BRIEF_RETRY_MS of a brief that failed.
  */
+/** How long a morning brief that failed to go in waits before the next try. */
+export const BRIEF_RETRY_MS = 10 * 60_000
+
 export function isBriefDue(input: {
+  isBriefingPending?: boolean
+  lastFailedAt?: number
   day: string
   hour: number
   briefHour: number
@@ -477,6 +483,8 @@ export function isBriefDue(input: {
   draft: string
 }): boolean {
   if (input.hour < input.briefHour || input.lastBriefDay === input.day) return false
+  if (input.isBriefingPending) return false
+  if (input.lastFailedAt !== undefined && input.now - input.lastFailedAt < BRIEF_RETRY_MS) return false
   if (input.isTurnRunning || input.isRotating || input.draft.trim() !== '') return false
   return input.lastWakeAt === undefined || input.now - input.lastWakeAt >= WAKE_EVERY_MS
 }
