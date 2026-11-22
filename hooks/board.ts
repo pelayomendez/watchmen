@@ -517,12 +517,12 @@ export type Ignored = { counts: Record<string, number>; asked: string[] }
 export const IGNORE_AFTER = 2
 
 /**
- * Whether taking an item off the board, or to done, dismisses it unattended: it sat in needs-you
- * or still carried a change nobody triaged. Items without a kind are never counted.
+ * Whether dropping an item dismisses it unattended: it sat in needs-you and was taken off the board
+ * rather than dealt with. A move to done is ordinary triage and never counts, nor does an item
+ * without a kind.
  */
-export function isDismissed(item: Item, to: Lane | 'dropped'): boolean {
-  if (!item.kind || (to !== 'dropped' && to !== 'done')) return false
-  return item.lane === 'needs-you' || item.isChanged === true
+export function isDismissed(item: Item): boolean {
+  return !!item.kind && item.lane === 'needs-you'
 }
 
 export function noteDismissed(state: Ignored, kind: string): Ignored {

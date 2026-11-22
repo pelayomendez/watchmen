@@ -577,14 +577,11 @@ test('on the desktop app, /watchmen start opens the pane as a widget', async ($,
   expect(seen.placements).toEqual(['widget'])
 })
 
-test('a dismissed item is one dropped or taken to done while it needed you or carried a change', () => {
+test('a dismissed item is one with a kind dropped while it sat in needs-you', () => {
   const mr: Item = { id: 'a', title: 'A', lane: 'needs-you', kind: 'mr' }
-  expect(isDismissed(mr, 'dropped')).toBe(true)
-  expect(isDismissed(mr, 'done')).toBe(true)
-  expect(isDismissed(mr, 'waiting')).toBe(false)
-  expect(isDismissed({ ...mr, lane: 'moving' }, 'done')).toBe(false)
-  expect(isDismissed({ ...mr, lane: 'moving', isChanged: true }, 'dropped')).toBe(true)
-  expect(isDismissed({ ...mr, kind: undefined }, 'dropped')).toBe(false)
+  expect(isDismissed(mr)).toBe(true)
+  expect(isDismissed({ ...mr, lane: 'moving', isChanged: true })).toBe(false)
+  expect(isDismissed({ ...mr, kind: undefined })).toBe(false)
   let state = noteDismissed({ counts: {}, asked: [] }, 'ci')
   expect(dismissedQuestion(state).line).toBeUndefined()
   state = noteDismissed(state, 'ci')
@@ -602,6 +599,7 @@ test('after two dismissed items of a kind, board_changes asks the watch to ask t
       '.companion/board.json': serialize([
         { id: 'p1', title: 'Pipeline 1', lane: 'needs-you', kind: 'ci' },
         { id: 'p2', title: 'Pipeline 2', lane: 'needs-you', kind: 'ci' },
+        { id: 'p3', title: 'Pipeline 3', lane: 'needs-you', kind: 'ci' },
         { id: 'deck', title: 'Deck', lane: 'needs-you', kind: 'todo' },
       ]),
     },
@@ -609,9 +607,12 @@ test('after two dismissed items of a kind, board_changes asks the watch to ask t
   )
   await $.session.start(START)
   await seen.clock.settle()
-  await $.tool.call({ tool: 'mcp__watchmen__board_drop', id: 'p1' })
+  // Taking an item to done is triage, never a dismissal.
+  await $.tool.call({ tool: 'mcp__watchmen__board_move', id: 'p1', lane: 'done' })
+  await $.tool.call({ tool: 'mcp__watchmen__board_drop', id: 'deck' })
   expect((await $.tool.call({ tool: 'mcp__watchmen__board_changes' })).result).not.toContain('stop raising')
-  await $.tool.call({ tool: 'mcp__watchmen__board_move', id: 'p2', lane: 'done' })
+  // Two drops at once both count.
+  await Promise.all([$.tool.call({ tool: 'mcp__watchmen__board_drop', id: 'p2' }), $.tool.call({ tool: 'mcp__watchmen__board_drop', id: 'p3' })])
   const report = (await $.tool.call({ tool: 'mcp__watchmen__board_changes' })).result ?? ''
   expect(report).toContain("dismissed 2 'ci' items")
   expect(report).not.toContain("'todo'")

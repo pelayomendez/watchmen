@@ -154,10 +154,24 @@ async function readIgnored($: EngineInterface): Promise<Ignored> {
   return { counts: { ...(kept?.counts ?? {}) }, asked: [...(kept?.asked ?? [])] }
 }
 
-/** Counts an item dismissed unattended (dropped, or taken to done, from needs-you or changed). */
-async function countDismissed($: EngineInterface, item: Item | undefined, to: Lane | 'dropped') {
-  if (!item || !isDismissed(item, to)) return
-  await $.store.set(await ignoredKey($), noteDismissed(await readIgnored($), item.kind!))
+// Changes to what was dismissed run one after another, each reading what the last one wrote, so
+// two drops at once both count.
+let ignoring: Promise<unknown> = Promise.resolve()
+
+function changeIgnored<T>($: EngineInterface, fn: (state: Ignored) => { state?: Ignored; value: T }): Promise<T> {
+  const run = ignoring.then(async () => {
+    const out = fn(await readIgnored($))
+    if (out.state) await $.store.set(await ignoredKey($), out.state)
+    return out.value
+  })
+  ignoring = run.catch(() => undefined)
+  return run
+}
+
+/** Counts an item dropped while it sat in needs-you. */
+async function countDismissed($: EngineInterface, item: Item | undefined) {
+  if (!item || !isDismissed(item)) return
+  await changeIgnored($, state => ({ state: noteDismissed(state, item.kind!), value: undefined }))
 }
 
 async function commandHash($: EngineInterface, argv: readonly string[]): Promise<string> {
@@ -834,10 +848,7 @@ export const register: Register = on => {
     const note = typeof input.note === 'string' ? input.note : undefined
     const before = await read($, board)
     const answer = await change($, items => move(items, String(input.id), lane, note), () => 'Moved.')
-    if ('result' in answer) {
-      await pingNeedsYou($, enteredNeedsYou(before, await read($, board)))
-      if (lane) await countDismissed($, before.find(one => one.id === String(input.id)), lane)
-    }
+    if ('result' in answer) await pingNeedsYou($, enteredNeedsYou(before, await read($, board)))
     return answer
   })
 
@@ -846,7 +857,7 @@ export const register: Register = on => {
     const id = String((e as Record<string, unknown>).id)
     const item = (await read($, board)).find(one => one.id === id)
     const answer = await change($, items => drop(items, id), items => `Dropped. ${items.length} items left.`)
-    if ('result' in answer) await countDismissed($, item, 'dropped')
+    if ('result' in answer) await countDismissed($, item)
     return answer
   })
 
@@ -854,10 +865,11 @@ export const register: Register = on => {
     if (!(await isWatch($))) return { deny: NOT_WATCH }
     const report = changeReport(await read($, board))
     // Once a kind has been dismissed often enough, the report asks the watch to ask, once.
-    const asked = dismissedQuestion(await readIgnored($))
-    if (!asked.line) return { result: report }
-    await $.store.set(await ignoredKey($), asked.state)
-    return { result: `${report}\n\n${asked.line}` }
+    const line = await changeIgnored($, state => {
+      const asked = dismissedQuestion(state)
+      return asked.line ? { state: asked.state, value: asked.line } : { value: undefined }
+    })
+    return { result: line ? `${report}\n\n${line}` : report }
   })
 
   on('command.run', { command: 'watchmen' }, async ($, e) => {
