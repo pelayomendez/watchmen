@@ -202,7 +202,10 @@ function engine(on: On, files: Record<string, string>, percent: number) {
   on('ui.status', ($, e) => (status.push(e.text), { value: undefined }))
   on('ui.toast', ($, e) => (toasts.push(e.text), { value: undefined }))
   const opened: string[] = []
-  on('ui.open', ($, e) => (opened.push(e.id), { value: { isPlaced: true as const } }))
+  const placements: (string | undefined)[] = []
+  on('ui.open', ($, e) => (opened.push(e.id), placements.push(e.placement), { value: { isPlaced: true as const } }))
+  let surfaces: readonly string[] = ['terminal']
+  on('session.surfaces', () => ({ value: surfaces }) as never)
   // The engine's own band beneath the plugins: nothing drawn.
   on('ui.render', { component: 'AbovePrompt' }, ($, e) => h($.ui.resolve(e).Box, {}) as never)
   let draft = ''
@@ -268,6 +271,8 @@ function engine(on: On, files: Record<string, string>, percent: number) {
     failNextSubmit: () => (failNextSubmit = true),
     failNextUsage: () => (failNextUsage = true),
     lookups,
+    placements,
+    setSurfaces: (value: readonly string[]) => (surfaces = value),
     install: (name: string, outputs: Record<string, string> = {}) => (clis.add(name), Object.assign(lookupOutputs, outputs)),
     failNextRegister: () => (failNextRegister = true),
     asUser,
@@ -356,7 +361,8 @@ test('/watchmen start makes a session that was not launched the watch: state, to
 
   expect(seen.tools).toEqual(BOARD_TOOLS)
   expect(seen.commands.at(-1)).toContain('watchmen: The watch: open the board')
-  expect(seen.opened).toEqual(['board'])
+  // In a terminal the pane is not opened on start: the band shows the counts.
+  expect(seen.opened).toEqual([])
   expect(seen.logs).toEqual([])
   expect(seen.prompts).toHaveLength(1)
   // The person typed /watchmen start, so the briefing reads as their own words.
@@ -545,6 +551,18 @@ test('back after an hour, the band says what happened since you looked, until yo
   expect(JSON.stringify(await (await mountBand($, 120)).drawn())).toContain('since you looked: 1 need you · 0 moved')
   await typedPrompt('ok')
   expect(JSON.stringify(await (await mountBand($, 120)).drawn())).not.toContain('since you looked')
+})
+
+test('on the desktop app, /watchmen start opens the pane as a widget', async ($, on) => {
+  mock.env(on, {})
+  const seen = engine(on, {}, 10)
+  seen.setSurfaces(['desktop'])
+  await $.session.start(START)
+  await seen.clock.settle()
+  await $.command.run({ ...typed('start'), origin: { kind: 'sdk' } } as never)
+  await seen.clock.settle()
+  expect(seen.opened).toEqual(['board'])
+  expect(seen.placements).toEqual(['widget'])
 })
 
 test('the briefing is the launcher\'s: persona, skill, task model, about-you, handoff', () => {
