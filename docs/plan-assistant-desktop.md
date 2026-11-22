@@ -53,10 +53,10 @@ After the first try the owner called it "a session with a todo list". Four chang
   when `glab api user` names a username), Jira work in progress assigned to them (`acli jira
   workitem search`), and how many Claude sessions changed a transcript here or below in the last
   three hours (no transcript content). Up to 15 items not already on the board (titles, ids and
-  links only) close the `/watchmen start` briefing as a "Found" section, or reach a launched watch as
-  a message of its own. The watch proposes them in one short message and adds only what the person
-  accepts. `/watchmen approve all`, typed by the person, approves every waiting check and lists each
-  command it approved.
+  links only, titles JSON-quoted) follow the briefing as the plugin's own message, never as the
+  person's words. The watch proposes them in one short message and adds only what the person
+  accepts. `/watchmen approve all`, typed by the person, lists every waiting check and a hash over
+  that set; `/watchmen approve all <hash>` approves exactly that set, refused if it changed.
 - **It speaks first.** A morning brief once a day, on the first tick at or after
   `WATCHMEN_BRIEF_HOUR` (9 by default), never over a running turn, the person's typing or a
   rotation, counted as a wake for the rate limit. And when the person types after an hour or more
@@ -65,8 +65,8 @@ After the first try the owner called it "a session with a todo list". Four chang
 - **Less board, more conversation.** `/watchmen start` opens the pane as a widget on the desktop
   app and not at all in a terminal; the band carries the counts, `/watchmen` opens the board, and
   the fullscreen layout still docks it.
-- **It learns from what you ignore.** Items of a kind dropped or taken to done while they sat in
-  needs-you or carried an untriaged change are counted per workspace; at two, `board_changes` asks
+- **It learns from what you ignore.** Items of a kind dropped while they sat in
+  needs-you are counted per workspace (a move to done is triage and never counts); at two, `board_changes` asks
   the watch, once, to ask whether to stop raising that kind and to note the answer in
   `.companion/about-you.md`. The persona honours that file when deciding what needs the person.
 

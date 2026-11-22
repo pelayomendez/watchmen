@@ -11,11 +11,11 @@ watchmen as your assistant, on the desktop too.
 - `/watchmen` is offered in every session; outside the watch it only says how to start, and the board tools stay off.
 - The board pane draws a glance when the desktop app seats it as a widget: the mascot, the lane counts and the first thing that needs you.
 - The watch remembers you in `.companion/about-you.md`: it reads it at the start and adds a line when you correct how it reports. It never records secrets, credentials or details about other people.
-- First run proposes what to watch: fixed, read-only lookups (gh, glab, acli, recent Claude sessions here), each only if its CLI is installed, close the briefing with a "Found" section; the watch offers those items and adds only what you accept. Nothing found runs a check before you approve it.
-- `/watchmen approve all` approves every waiting check at once and lists each command it approved; like `approve`, only when you type it.
+- First run proposes what to watch: fixed, read-only lookups (gh, glab, acli, recent Claude sessions here), each only if its CLI is installed, follow the briefing as the plugin's own message; the watch offers those items and adds only what you accept. Nothing found runs a check before you approve it.
+- `/watchmen approve all` lists every waiting check with its command and a hash over that set; `/watchmen approve all <hash>` approves exactly that set, refused if it changed in between. Like `approve`, only when you type it.
 - The watch speaks first: a morning brief once a day at `WATCHMEN_BRIEF_HOUR` (9 by default), and, back after an hour away, the band says "since you looked: N need you · M moved" until you type again.
 - Less board: `/watchmen start` opens the pane as a widget on the desktop and leaves it closed in a terminal.
-- It learns from what you ignore: after two items of a kind dismissed unattended, it asks once whether to stop raising that kind and notes the answer in `.companion/about-you.md`.
+- It learns from what you ignore: after two items of a kind dropped while they sat in needs-you, it asks once whether to stop raising that kind and notes the answer in `.companion/about-you.md`.
 - The README leads with the assistant ("Tell it what to watch. It tells you what needs you.") and has an "On the desktop" section.
 
 ## 0.2.0
