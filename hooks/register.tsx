@@ -180,6 +180,20 @@ async function isApproved($: EngineInterface, argv: readonly string[]): Promise<
   return (await $.store.get(await approvalKey($, argv))) === true
 }
 
+/** Every check on the board (not done) whose command is not approved yet, sorted by id. */
+async function pendingChecks($: EngineInterface): Promise<{ id: string; argv: string[] }[]> {
+  const pending: { id: string; argv: string[] }[] = []
+  for (const item of await read($, board)) {
+    if (item.check && item.lane !== 'done' && !(await isApproved($, item.check.argv))) pending.push({ id: item.id, argv: [...item.check.argv] })
+  }
+  return pending.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+}
+
+/** The short hash the person types to approve exactly this set of checks, in this workspace. */
+async function setHash($: EngineInterface, pending: readonly { id: string; argv: readonly string[] }[]): Promise<string> {
+  return (await sha256(JSON.stringify([await $.session.cwd(), pending.map(one => [one.id, one.argv])]))).slice(0, 16)
+}
+
 // Saves run one after another, each writing the board as it stands when its turn comes, so a slow
 // save never lands after a newer one. Each writes a temp file and renames it over board.json.
 let saving: Promise<void> = Promise.resolve()
@@ -894,19 +908,26 @@ export const register: Register = on => {
       if (e.origin.kind !== 'composer' && e.origin.kind !== 'bridge') {
         return { text: 'Only you can approve a check: type /watchmen approve <id> <hash> yourself.' }
       }
-      // approve all: every check not yet approved, each command shown in the answer; the approval
-      // is for exactly the argv read here, as with one approve.
-      if (rest[0] === 'all' && rest.length === 1) {
-        const lines: string[] = []
-        for (const item of await read($, board)) {
-          if (!item.check || item.lane === 'done' || (await isApproved($, item.check.argv))) continue
-          await $.store.set(await approvalKey($, item.check.argv), true)
-          await setAwaiting($, item.id, undefined)
-          lines.push(`  ${item.id}: ${sanitize(JSON.stringify(item.check.argv))}`)
+      // approve all, in two steps: `approve all` lists every waiting check and one hash over that
+      // exact set; `approve all <hash>` approves the set only while it is still the one listed, so
+      // nothing the person did not read is approved.
+      if (rest[0] === 'all' && rest.length <= 2) {
+        const pending = await pendingChecks($)
+        if (pending.length === 0) return { text: 'No check is waiting for approval.' }
+        const hash = await setHash($, pending)
+        const listed = pending.map(one => `  ${sanitize(one.id)}: ${sanitize(JSON.stringify(one.argv))}`)
+        if (rest[1] === undefined) {
+          return { text: [`Waiting for approval (${pending.length}):`, ...listed, `To approve exactly these, type /watchmen approve all ${hash}`].join('\n') }
         }
-        if (lines.length === 0) return { text: 'No check is waiting for approval.' }
+        if (rest[1] !== hash) {
+          return { text: ['Not approved: the checks waiting changed since that list. Now waiting:', ...listed, `To approve exactly these, type /watchmen approve all ${hash}`].join('\n') }
+        }
+        for (const one of pending) {
+          await $.store.set(await approvalKey($, one.argv), true)
+          await setAwaiting($, one.id, undefined)
+        }
         await save($)
-        return { text: [`Approved for this workspace (${lines.length}):`, ...lines].join('\n') }
+        return { text: [`Approved for this workspace (${pending.length}):`, ...listed].join('\n') }
       }
       const item = (await read($, board)).find(one => one.id === rest[0])
       if (!item?.check) return { text: `No item "${rest[0] ?? ''}" with a check on the board.` }
