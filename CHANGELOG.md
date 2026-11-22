@@ -6,11 +6,16 @@ Releases are tagged `watchmen--v<version>` (Claude Code) and `v<version>` (herdr
 
 watchmen as your assistant, on the desktop too.
 
-- `/watchmen start` makes any session the watch, the Claude desktop app's included: it loads the board, opens the pane and sends the launcher's briefing as the first message. The session keeps the model picked there. It cannot be started by the model or another plugin.
+- `/watchmen start` makes any session the watch, the Claude desktop app's included: it loads the board and sends the launcher's briefing as the first message. The session keeps the model picked there. It cannot be started by the model or another plugin.
 - Check approvals (`/watchmen approve`) are still typed in a terminal session or through Remote Control; typing them in the desktop app may not count until that is confirmed.
 - `/watchmen` is offered in every session; outside the watch it only says how to start, and the board tools stay off.
 - The board pane draws a glance when the desktop app seats it as a widget: the mascot, the lane counts and the first thing that needs you.
 - The watch remembers you in `.companion/about-you.md`: it reads it at the start and adds a line when you correct how it reports. It never records secrets, credentials or details about other people.
+- First run proposes what to watch: fixed, read-only lookups (gh, glab, acli, recent Claude sessions here), each only if its CLI is installed, close the briefing with a "Found" section; the watch offers those items and adds only what you accept. Nothing found runs a check before you approve it.
+- `/watchmen approve all` approves every waiting check at once and lists each command it approved; like `approve`, only when you type it.
+- The watch speaks first: a morning brief once a day at `WATCHMEN_BRIEF_HOUR` (9 by default), and, back after an hour away, the band says "since you looked: N need you · M moved" until you type again.
+- Less board: `/watchmen start` opens the pane as a widget on the desktop and leaves it closed in a terminal.
+- It learns from what you ignore: after two items of a kind dismissed unattended, it asks once whether to stop raising that kind and notes the answer in `.companion/about-you.md`.
 - The README leads with the assistant ("Tell it what to watch. It tells you what needs you.") and has an "On the desktop" section.
 
 ## 0.2.0

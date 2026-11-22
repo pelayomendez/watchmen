@@ -42,6 +42,37 @@ draws plugin panes, and can shrink a pane to a small widget.
   `/watchmen start`.
 - CHANGELOG 0.3.0.
 
+### 5. Feel like an assistant, not a session with a todo list
+
+After the first try the owner called it "a session with a todo list". Four changes make it act first:
+
+- **First run proposes what to watch.** When the watch starts, the plugin runs a fixed set of
+  read-only lookups, shipped in the module and never chosen by the model, each only where its CLI is
+  installed, each with a short timeout, failures ignored: open GitHub PRs authored by and awaiting
+  review from the person (`gh search prs`), the same on GitLab (`glab api`, the reviewer search only
+  when `glab api user` names a username), Jira work in progress assigned to them (`acli jira
+  workitem search`), and how many Claude sessions changed a transcript here or below in the last
+  three hours (no transcript content). Up to 15 items not already on the board (titles, ids and
+  links only) close the `/watchmen start` briefing as a "Found" section, or reach a launched watch as
+  a message of its own. The watch proposes them in one short message and adds only what the person
+  accepts. `/watchmen approve all`, typed by the person, approves every waiting check and lists each
+  command it approved.
+- **It speaks first.** A morning brief once a day, on the first tick at or after
+  `WATCHMEN_BRIEF_HOUR` (9 by default), never over a running turn, the person's typing or a
+  rotation, counted as a wake for the rate limit. And when the person types after an hour or more
+  away, the band says "since you looked: N need you · M moved" until they type again, computed
+  without a model call.
+- **Less board, more conversation.** `/watchmen start` opens the pane as a widget on the desktop
+  app and not at all in a terminal; the band carries the counts, `/watchmen` opens the board, and
+  the fullscreen layout still docks it.
+- **It learns from what you ignore.** Items of a kind dropped or taken to done while they sat in
+  needs-you or carried an untriaged change are counted per workspace; at two, `board_changes` asks
+  the watch, once, to ask whether to stop raising that kind and to note the answer in
+  `.companion/about-you.md`. The persona honours that file when deciding what needs the person.
+
+Security stays as it was: the lookups are fixed and read-only, and nothing found runs a check until
+the person approves it.
+
 ## Out of scope for now
 
 Phone/Telegram, a separate menu-bar app, choosing another model provider.

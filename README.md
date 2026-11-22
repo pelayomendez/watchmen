@@ -66,9 +66,15 @@ The Claude desktop app cannot run the launcher, so the watch starts from inside 
 2. Open a session in your workspace folder, the one whose `.companion/` holds the board and the handoffs.
 3. Type `/watchmen start`.
 
-That session becomes the watch: it loads the board, opens the board pane, and sends the launcher's briefing as its first message. It runs on the model you picked in the app, and still hands real tasks to an `opus` subagent. Minimize the pane and it stays on screen as a widget: the mascot, the lane counts and the first thing that needs you. The model and other plugins cannot start the watch: `/watchmen start` is refused unless it is typed.
+That session becomes the watch: it loads the board, opens the board pane as a small widget, and sends the launcher's briefing as its first message, closed by what it found to watch. It runs on the model you picked in the app, and still hands real tasks to an `opus` subagent. The widget shows the mascot, the lane counts and the first thing that needs you; expand it for the whole board. In a terminal, `/watchmen start` leaves the pane closed: the band carries the counts and `/watchmen` opens the board. The model and other plugins cannot start the watch: `/watchmen start` is refused unless it is typed.
 
 **Approving checks.** `/watchmen approve <id> <hash>` counts only when you type it in a terminal session or through Remote Control. Typing it in the desktop app may not count until that has been confirmed, so approve new checks from a terminal (`claude` in the same workspace) for now; the approval holds for the workspace, so the desktop watch runs the check from then on.
+
+## It acts like an assistant
+
+- **It proposes what to watch.** When the watch starts it runs a few fixed, read-only lookups, each only if its CLI is installed: your open GitHub PRs and the ones awaiting your review (`gh search prs`), the same on GitLab (`glab api`), your Jira work in progress (`acli jira workitem search`), and how many Claude sessions were active in this folder or below in the last three hours. What is not on the board yet (titles, ids and links, at most 15) it offers in one short message ("You have 3 open PRs and 2 reviews waiting on you. Watch them?"), and adds only what you accept. `/watchmen approve all` then approves their checks in one go. The lookups are shipped with the plugin, never chosen by the model.
+- **It speaks first.** Once a day, at 9 or at `WATCHMEN_BRIEF_HOUR`, it gives you the day's brief without being asked, unless you are typing or it is busy. Come back after an hour or more and the band says what happened meanwhile, "since you looked: 1 need you · 3 moved", until you type again.
+- **It learns from what you ignore.** When you dismiss two items of the same kind without acting on them, it asks you once whether to stop raising that kind, and notes your answer in `.companion/about-you.md`.
 
 ## It remembers you
 
