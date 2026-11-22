@@ -17,6 +17,10 @@ export type Watch = {
   baseTokens?: number
   /** A rotation under way: the handoff asked for (before: the newest handoff then), or the resume sent. */
   rotation?: { phase: 'handoff' | 'resume'; since: number; before?: string }
+  /** The local hour the morning brief is due from (WATCHMEN_BRIEF_HOUR at start, else 9). */
+  briefHour?: number
+  /** The local day (YYYY-MM-DD) the watch last spoke first on, or started on past the brief hour. */
+  lastBriefDay?: string
 }
 
 /** What the band shows of the watch itself: its context fill and how long it has been idle. */

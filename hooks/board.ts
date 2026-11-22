@@ -444,3 +444,39 @@ export function glance(items: readonly Item[]): { counts: string; first: string;
   if (changed) return { counts: line, first: sanitize(`changed: ${changed.title}`), isNeedsYou: false }
   return { counts: line, first: 'Nothing needs you.', isNeedsYou: false }
 }
+
+/** The prompt that has the watch speak first on a new day. */
+export const BRIEF_PROMPT =
+  "◆ morning — give the human the day's brief: call board_changes, then say what needs them first and what moved, in a few sentences."
+
+/** The local calendar day and hour of a time: what the morning brief is scheduled by. */
+export function localDay(now: number): { day: string; hour: number } {
+  const at = new Date(now)
+  const pad = (value: number) => String(value).padStart(2, '0')
+  return { day: `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())}`, hour: at.getHours() }
+}
+
+/** The hour the morning brief is due from: WATCHMEN_BRIEF_HOUR when it is 0-23, else 9. */
+export function briefHourOf(value: string | undefined): number {
+  return value !== undefined && /^[0-9]{1,2}$/.test(value) && Number(value) <= 23 ? Number(value) : 9
+}
+
+/**
+ * Whether the morning brief is due: at or past the brief hour on a day not briefed yet, never over
+ * a running turn, the person's typing or a rotation, and no sooner after a wake than wakes allow.
+ */
+export function isBriefDue(input: {
+  day: string
+  hour: number
+  briefHour: number
+  lastBriefDay?: string
+  now: number
+  lastWakeAt?: number
+  isTurnRunning: boolean
+  isRotating: boolean
+  draft: string
+}): boolean {
+  if (input.hour < input.briefHour || input.lastBriefDay === input.day) return false
+  if (input.isTurnRunning || input.isRotating || input.draft.trim() !== '') return false
+  return input.lastWakeAt === undefined || input.now - input.lastWakeAt >= WAKE_EVERY_MS
+}

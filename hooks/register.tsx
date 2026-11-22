@@ -34,6 +34,10 @@ import {
   resumePrompt,
   summary,
   glance,
+  BRIEF_PROMPT,
+  briefHourOf,
+  isBriefDue,
+  localDay,
   track,
 } from './board'
 import type { CheckOutcome, CheckResult, ItemPatch } from './board'
@@ -380,6 +384,39 @@ async function maybeWake($: EngineInterface, now: number) {
 }
 
 /**
+ * The morning brief: on the first tick of a new local day at or past the brief hour, the watch is
+ * asked to speak first, once that day. It counts as a wake for the wake rate limit.
+ */
+async function maybeBrief($: EngineInterface, now: number) {
+  if (isWaking) return
+  const watch = (await $.state.get(WATCH)).value
+  if (!watch) return
+  const { day, hour } = localDay(now)
+  const draft = (await $.prompt.read()).text
+  const due = isBriefDue({
+    day,
+    hour,
+    briefHour: watch.briefHour ?? 9,
+    lastBriefDay: watch.lastBriefDay,
+    now,
+    lastWakeAt: watch.wake?.lastWakeAt,
+    isTurnRunning,
+    isRotating: watch.rotation !== undefined,
+    draft,
+  })
+  if (!due) return
+  isWaking = true
+  try {
+    await $.prompt.submit({ text: BRIEF_PROMPT })
+    await patchWatch($, held => ({ ...held, lastBriefDay: day, wake: { pending: held.wake?.pending ?? [], lastWakeAt: now } }))
+  } catch (error) {
+    $.ui.log(`watchmen: the morning brief was not sent: ${String(error)}`)
+  } finally {
+    isWaking = false
+  }
+}
+
+/**
  * Pings the person about items that just moved into needs-you: a native notification and, inside
  * herdr, a herdr notification, so it reaches them from any tab. Quiet changes never ping.
  */
@@ -481,6 +518,7 @@ async function tick($: EngineInterface) {
   }
   if (watch.herdr) void publishSidebar($, watch.herdr, items)
   if (!watch.rotation) await maybeWake($, now)
+  if (!watch.rotation) await maybeBrief($, now)
   const { context } = await $.session.usage()
   const percent = context.percent ?? 0
   // The watch's figures go in the band, where they can be coloured; a plugin's status line is
@@ -555,11 +593,17 @@ async function startWatch($: EngineInterface, skill: string | undefined): Promis
   let watch = held
   if (!watch) {
     const boardError = await loadBoard($)
+    const startedAt = await $.clock.now()
+    const briefHour = briefHourOf((await $.env.get('WATCHMEN_BRIEF_HOUR')) || undefined)
+    const today = localDay(startedAt)
     watch = {
       handoff: await latestHandoff($),
+      briefHour,
+      // Started past the brief hour, the watch's opening brief is today's.
+      ...(today.hour >= briefHour ? { lastBriefDay: today.day } : {}),
       skill,
       ...(await herdrOf($)),
-      startedAt: await $.clock.now(),
+      startedAt,
       warned: false,
       ...(boardError ? { boardError } : {}),
     } satisfies Watch

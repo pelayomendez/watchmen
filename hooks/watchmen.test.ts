@@ -3,7 +3,7 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 
 import type { Item } from '../types'
-import { applyCheck, applyToBoard, approvalLines, attempt, dueChecks, enteredNeedsYou, glance, MASCOT_COLORS, mascotState, paintAtom, queueWake, SIDEBAR_ROW, sidebarToken, sidebarTokens, wakePrompt, move, parse, parseBoard, serialize, vitals, isRotationDue, ROTATE_IDLE_MS, ROTATE_PROMPT, summary, track } from './board'
+import { applyCheck, applyToBoard, approvalLines, attempt, BRIEF_PROMPT, briefHourOf, isBriefDue, localDay, dueChecks, enteredNeedsYou, glance, MASCOT_COLORS, mascotState, paintAtom, queueWake, SIDEBAR_ROW, sidebarToken, sidebarTokens, wakePrompt, move, parse, parseBoard, serialize, vitals, isRotationDue, ROTATE_IDLE_MS, ROTATE_PROMPT, summary, track } from './board'
 import { newestBackupOf, newestHandoff } from './register'
 import { briefing, pickModel, skillCandidates } from './briefing'
 import { foundSection, glabReviewLookup, notOnBoard, parseGh, parseGlab, parseJira, projectDirName, recentSessions } from './discover'
@@ -487,6 +487,33 @@ test('/watchmen approve all approves every waiting check, shows each command, an
   await $.tool.call({ tool: 'mcp__watchmen__board_track', id: 'mr', check: { argv: ['glab', 'mr', '--other'] } })
   await seen.clock.advance(MIN)
   expect(seen.runs.filter(argv => argv.includes('--other'))).toEqual([])
+})
+
+test('the morning brief is due once a day, at or past its hour, never over the person', () => {
+  const base = { day: '2026-11-22', hour: 9, briefHour: 9, now: 10 * MIN, isTurnRunning: false, isRotating: false, draft: '' }
+  expect(isBriefDue(base)).toBe(true)
+  expect(isBriefDue({ ...base, hour: 8 })).toBe(false)
+  expect(isBriefDue({ ...base, lastBriefDay: '2026-11-22' })).toBe(false)
+  expect(isBriefDue({ ...base, lastBriefDay: '2026-11-21' })).toBe(true)
+  expect(isBriefDue({ ...base, isTurnRunning: true })).toBe(false)
+  expect(isBriefDue({ ...base, isRotating: true })).toBe(false)
+  expect(isBriefDue({ ...base, draft: 'hm' })).toBe(false)
+  expect(isBriefDue({ ...base, lastWakeAt: 9 * MIN })).toBe(false)
+  expect([briefHourOf('7'), briefHourOf('24'), briefHourOf('x'), briefHourOf(undefined)]).toEqual([7, 9, 9, 9])
+  expect(localDay(new Date(2026, 10, 22, 9, 30).getTime())).toEqual({ day: '2026-11-22', hour: 9 })
+})
+
+test('the watch speaks first once a day at the brief hour', { timeoutMs: 90_000 }, async ($, on) => {
+  mock.env(on, { WATCHMEN: '1', WATCHMEN_BRIEF_HOUR: '9' })
+  const seen = engine(on, {}, 10)
+  await $.session.start(START)
+  await seen.clock.settle()
+  const briefs = () => seen.prompts.filter(text => text === BRIEF_PROMPT).length
+  for (let hours = 0; briefs() === 0 && hours < 25; hours++) await seen.clock.advance(3_600_000)
+  expect(briefs()).toBe(1)
+  // The rest of that day, no second brief.
+  await seen.clock.advance(12 * 3_600_000)
+  expect(briefs()).toBe(1)
 })
 
 test('the briefing is the launcher\'s: persona, skill, task model, about-you, handoff', () => {
