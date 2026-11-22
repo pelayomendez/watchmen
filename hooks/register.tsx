@@ -886,12 +886,13 @@ export const register: Register = on => {
       // would wait on the turn the hook holds), so a timer sends it once the command has answered;
       // the engine starts that turn when the session is idle, the board tools registered above in it.
       // The person typed /watchmen start, so the model reads the briefing as their own words.
-      // Discovery runs in that timer too, and what it finds ends the briefing.
+      // Discovery runs in that timer after it, and what it finds goes in as the plugin's own message,
+      // never as the person's words: its titles come from other people.
       const text = await startBriefing($, started)
       $.clock.after(0, async () => {
+        void $.prompt.submit({ text, asUser: true }).catch(error => $.ui.log(`watchmen: the briefing was not sent: ${String(error)}`))
         const found = await discover($).catch(() => undefined)
-        const full = found ? `${text}\n\n${found}` : text
-        void $.prompt.submit({ text: full, asUser: true }).catch(error => $.ui.log(`watchmen: the briefing was not sent: ${String(error)}`))
+        if (found) void $.prompt.submit({ text: found }).catch(error => $.ui.log(`watchmen: what discovery found was not sent: ${String(error)}`))
       })
       return { text: 'This session keeps the watch now. The briefing goes in as the first message.' }
     }
