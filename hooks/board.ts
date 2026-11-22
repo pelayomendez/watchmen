@@ -510,3 +510,35 @@ export function sinceYouLooked(
 export function lanesOf(items: readonly Item[]): Record<string, Lane> {
   return Object.fromEntries(items.map(one => [one.id, one.lane]))
 }
+
+/** The kinds of item the person dismissed unattended, and the kinds the watch already asked about. */
+export type Ignored = { counts: Record<string, number>; asked: string[] }
+/** How many dismissed items of one kind make the watch ask whether to stop raising that kind. */
+export const IGNORE_AFTER = 2
+
+/**
+ * Whether taking an item off the board, or to done, dismisses it unattended: it sat in needs-you
+ * or still carried a change nobody triaged. Items without a kind are never counted.
+ */
+export function isDismissed(item: Item, to: Lane | 'dropped'): boolean {
+  if (!item.kind || (to !== 'dropped' && to !== 'done')) return false
+  return item.lane === 'needs-you' || item.isChanged === true
+}
+
+export function noteDismissed(state: Ignored, kind: string): Ignored {
+  return { ...state, counts: { ...state.counts, [kind]: (state.counts[kind] ?? 0) + 1 } }
+}
+
+/**
+ * The one line board_changes adds when a kind has been dismissed IGNORE_AFTER times and the watch
+ * has not asked about it yet, and the state with that kind marked asked.
+ */
+export function dismissedQuestion(state: Ignored): { line?: string; state: Ignored } {
+  const kind = Object.keys(state.counts).find(one => state.counts[one]! >= IGNORE_AFTER && !state.asked.includes(one))
+  if (kind === undefined) return { state }
+  const shown = sanitize(kind).slice(0, 40)
+  return {
+    line: `The human dismissed ${state.counts[kind]} '${shown}' items without acting on them. Ask them once, in one sentence, whether to stop raising '${shown}' items; if they agree, add a line saying so to .companion/about-you.md.`,
+    state: { ...state, asked: [...state.asked, kind] },
+  }
+}

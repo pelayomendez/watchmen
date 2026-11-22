@@ -3,7 +3,7 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 
 import type { Item } from '../types'
-import { AWAY_MS, lanesOf, sinceYouLooked, applyCheck, applyToBoard, approvalLines, attempt, BRIEF_PROMPT, briefHourOf, isBriefDue, localDay, dueChecks, enteredNeedsYou, glance, MASCOT_COLORS, mascotState, paintAtom, queueWake, SIDEBAR_ROW, sidebarToken, sidebarTokens, wakePrompt, move, parse, parseBoard, serialize, vitals, isRotationDue, ROTATE_IDLE_MS, ROTATE_PROMPT, summary, track } from './board'
+import { AWAY_MS, dismissedQuestion, isDismissed, noteDismissed, lanesOf, sinceYouLooked, applyCheck, applyToBoard, approvalLines, attempt, BRIEF_PROMPT, briefHourOf, isBriefDue, localDay, dueChecks, enteredNeedsYou, glance, MASCOT_COLORS, mascotState, paintAtom, queueWake, SIDEBAR_ROW, sidebarToken, sidebarTokens, wakePrompt, move, parse, parseBoard, serialize, vitals, isRotationDue, ROTATE_IDLE_MS, ROTATE_PROMPT, summary, track } from './board'
 import { newestBackupOf, newestHandoff } from './register'
 import { briefing, pickModel, skillCandidates } from './briefing'
 import { foundSection, glabReviewLookup, notOnBoard, parseGh, parseGlab, parseJira, projectDirName, recentSessions } from './discover'
@@ -563,6 +563,47 @@ test('on the desktop app, /watchmen start opens the pane as a widget', async ($,
   await seen.clock.settle()
   expect(seen.opened).toEqual(['board'])
   expect(seen.placements).toEqual(['widget'])
+})
+
+test('a dismissed item is one dropped or taken to done while it needed you or carried a change', () => {
+  const mr: Item = { id: 'a', title: 'A', lane: 'needs-you', kind: 'mr' }
+  expect(isDismissed(mr, 'dropped')).toBe(true)
+  expect(isDismissed(mr, 'done')).toBe(true)
+  expect(isDismissed(mr, 'waiting')).toBe(false)
+  expect(isDismissed({ ...mr, lane: 'moving' }, 'done')).toBe(false)
+  expect(isDismissed({ ...mr, lane: 'moving', isChanged: true }, 'dropped')).toBe(true)
+  expect(isDismissed({ ...mr, kind: undefined }, 'dropped')).toBe(false)
+  let state = noteDismissed({ counts: {}, asked: [] }, 'ci')
+  expect(dismissedQuestion(state).line).toBeUndefined()
+  state = noteDismissed(state, 'ci')
+  const asked = dismissedQuestion(state)
+  expect(asked.line).toContain("whether to stop raising 'ci' items")
+  expect(asked.line).toContain('.companion/about-you.md')
+  expect(dismissedQuestion(asked.state).line).toBeUndefined()
+})
+
+test('after two dismissed items of a kind, board_changes asks the watch to ask the human, once', async ($, on) => {
+  mock.env(on, { WATCHMEN: '1' })
+  const seen = engine(
+    on,
+    {
+      '.companion/board.json': serialize([
+        { id: 'p1', title: 'Pipeline 1', lane: 'needs-you', kind: 'ci' },
+        { id: 'p2', title: 'Pipeline 2', lane: 'needs-you', kind: 'ci' },
+        { id: 'deck', title: 'Deck', lane: 'needs-you', kind: 'todo' },
+      ]),
+    },
+    10,
+  )
+  await $.session.start(START)
+  await seen.clock.settle()
+  await $.tool.call({ tool: 'mcp__watchmen__board_drop', id: 'p1' })
+  expect((await $.tool.call({ tool: 'mcp__watchmen__board_changes' })).result).not.toContain('stop raising')
+  await $.tool.call({ tool: 'mcp__watchmen__board_move', id: 'p2', lane: 'done' })
+  const report = (await $.tool.call({ tool: 'mcp__watchmen__board_changes' })).result ?? ''
+  expect(report).toContain("dismissed 2 'ci' items")
+  expect(report).not.toContain("'todo'")
+  expect((await $.tool.call({ tool: 'mcp__watchmen__board_changes' })).result).not.toContain('stop raising')
 })
 
 test('the briefing is the launcher\'s: persona, skill, task model, about-you, handoff', () => {

@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Item, Vitals, Watch } from '../types'
+import type { Item, Lane, Vitals, Watch } from '../types'
 import {
   applyToBoard,
   approvalLines,
@@ -40,9 +40,12 @@ import {
   localDay,
   lanesOf,
   sinceYouLooked,
+  dismissedQuestion,
+  isDismissed,
+  noteDismissed,
   track,
 } from './board'
-import type { CheckOutcome, CheckResult, ItemPatch } from './board'
+import type { CheckOutcome, CheckResult, Ignored, ItemPatch } from './board'
 import { briefing, pickModel, skillCandidates } from './briefing'
 import {
   DISCOVERY_TIMEOUT_MS,
@@ -139,6 +142,22 @@ async function sha256(text: string): Promise<string> {
 async function showBoard($: EngineInterface, items: readonly Item[]): Promise<void> {
   const opened = await $.ui.open({ id: PANE, title: PANE_TITLE, closeOnEscape: true }).catch(() => undefined)
   if (!opened?.isPlaced) $.ui.log(summary(items))
+}
+
+// What the person dismissed unattended, by kind, kept per workspace across sessions.
+async function ignoredKey($: EngineInterface): Promise<string> {
+  return `ignored:${await sha256(await $.session.cwd())}`
+}
+
+async function readIgnored($: EngineInterface): Promise<Ignored> {
+  const kept = (await $.store.get(await ignoredKey($))) as Partial<Ignored> | undefined
+  return { counts: { ...(kept?.counts ?? {}) }, asked: [...(kept?.asked ?? [])] }
+}
+
+/** Counts an item dismissed unattended (dropped, or taken to done, from needs-you or changed). */
+async function countDismissed($: EngineInterface, item: Item | undefined, to: Lane | 'dropped') {
+  if (!item || !isDismissed(item, to)) return
+  await $.store.set(await ignoredKey($), noteDismissed(await readIgnored($), item.kind!))
 }
 
 async function commandHash($: EngineInterface, argv: readonly string[]): Promise<string> {
@@ -801,19 +820,30 @@ export const register: Register = on => {
     const note = typeof input.note === 'string' ? input.note : undefined
     const before = await read($, board)
     const answer = await change($, items => move(items, String(input.id), lane, note), () => 'Moved.')
-    if ('result' in answer) await pingNeedsYou($, enteredNeedsYou(before, await read($, board)))
+    if ('result' in answer) {
+      await pingNeedsYou($, enteredNeedsYou(before, await read($, board)))
+      if (lane) await countDismissed($, before.find(one => one.id === String(input.id)), lane)
+    }
     return answer
   })
 
   on('tool.call', { tool: 'mcp__watchmen__board_drop' }, async ($, e) => {
     if (!(await isWatch($))) return { deny: NOT_WATCH }
     const id = String((e as Record<string, unknown>).id)
-    return change($, items => drop(items, id), items => `Dropped. ${items.length} items left.`)
+    const item = (await read($, board)).find(one => one.id === id)
+    const answer = await change($, items => drop(items, id), items => `Dropped. ${items.length} items left.`)
+    if ('result' in answer) await countDismissed($, item, 'dropped')
+    return answer
   })
 
   on('tool.call', { tool: 'mcp__watchmen__board_changes' }, async $ => {
     if (!(await isWatch($))) return { deny: NOT_WATCH }
-    return { result: changeReport(await read($, board)) }
+    const report = changeReport(await read($, board))
+    // Once a kind has been dismissed often enough, the report asks the watch to ask, once.
+    const asked = dismissedQuestion(await readIgnored($))
+    if (!asked.line) return { result: report }
+    await $.store.set(await ignoredKey($), asked.state)
+    return { result: `${report}\n\n${asked.line}` }
   })
 
   on('command.run', { command: 'watchmen' }, async ($, e) => {
