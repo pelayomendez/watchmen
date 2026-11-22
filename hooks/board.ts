@@ -480,3 +480,33 @@ export function isBriefDue(input: {
   if (input.isTurnRunning || input.isRotating || input.draft.trim() !== '') return false
   return input.lastWakeAt === undefined || input.now - input.lastWakeAt >= WAKE_EVERY_MS
 }
+
+/** How long the person must have been away for the band to say what happened meanwhile. */
+export const AWAY_MS = 60 * 60_000
+
+/**
+ * What the band says when the person comes back after AWAY_MS or more: how many items came into
+ * needs-you since they last typed, and how many others moved lane or changed. Undefined when they
+ * were not away that long, or nothing happened.
+ */
+export function sinceYouLooked(
+  looked: { at: number; lanes: Record<string, Lane> } | undefined,
+  items: readonly Item[],
+  now: number,
+): string | undefined {
+  if (!looked || now - looked.at < AWAY_MS) return undefined
+  let need = 0
+  let moved = 0
+  for (const one of items) {
+    const before = looked.lanes[one.id]
+    const isChangedSince = (one.changedAt ?? 0) > looked.at
+    if (one.lane === 'needs-you' && before !== 'needs-you') need += 1
+    else if (before !== one.lane || isChangedSince) moved += 1
+  }
+  return need + moved === 0 ? undefined : `since you looked: ${need} need you · ${moved} moved`
+}
+
+/** Each item's lane by id: what the person saw when they last typed. */
+export function lanesOf(items: readonly Item[]): Record<string, Lane> {
+  return Object.fromEntries(items.map(one => [one.id, one.lane]))
+}

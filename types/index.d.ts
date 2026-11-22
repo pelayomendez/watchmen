@@ -21,6 +21,10 @@ export type Watch = {
   briefHour?: number
   /** The local day (YYYY-MM-DD) the watch last spoke first on, or started on past the brief hour. */
   lastBriefDay?: string
+  /** When the person last typed in the watch, and each item's lane then. */
+  looked?: { at: number; lanes: Record<string, Lane> }
+  /** What happened while they were away, shown in the band until they type again. */
+  sinceNote?: string
 }
 
 /** What the band shows of the watch itself: its context fill and how long it has been idle. */

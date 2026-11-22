@@ -3,7 +3,7 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 
 import type { Item } from '../types'
-import { applyCheck, applyToBoard, approvalLines, attempt, BRIEF_PROMPT, briefHourOf, isBriefDue, localDay, dueChecks, enteredNeedsYou, glance, MASCOT_COLORS, mascotState, paintAtom, queueWake, SIDEBAR_ROW, sidebarToken, sidebarTokens, wakePrompt, move, parse, parseBoard, serialize, vitals, isRotationDue, ROTATE_IDLE_MS, ROTATE_PROMPT, summary, track } from './board'
+import { AWAY_MS, lanesOf, sinceYouLooked, applyCheck, applyToBoard, approvalLines, attempt, BRIEF_PROMPT, briefHourOf, isBriefDue, localDay, dueChecks, enteredNeedsYou, glance, MASCOT_COLORS, mascotState, paintAtom, queueWake, SIDEBAR_ROW, sidebarToken, sidebarTokens, wakePrompt, move, parse, parseBoard, serialize, vitals, isRotationDue, ROTATE_IDLE_MS, ROTATE_PROMPT, summary, track } from './board'
 import { newestBackupOf, newestHandoff } from './register'
 import { briefing, pickModel, skillCandidates } from './briefing'
 import { foundSection, glabReviewLookup, notOnBoard, parseGh, parseGlab, parseJira, projectDirName, recentSessions } from './discover'
@@ -514,6 +514,37 @@ test('the watch speaks first once a day at the brief hour', { timeoutMs: 90_000 
   // The rest of that day, no second brief.
   await seen.clock.advance(12 * 3_600_000)
   expect(briefs()).toBe(1)
+})
+
+test('since you looked: what came into needs-you and what else moved, only after an hour away', () => {
+  const before: Item[] = [{ id: 'a', title: 'A', lane: 'moving' }, { id: 'b', title: 'B', lane: 'waiting' }, { id: 'c', title: 'C', lane: 'needs-you' }]
+  const looked = { at: 0, lanes: lanesOf(before) }
+  const after: Item[] = [
+    { id: 'a', title: 'A', lane: 'needs-you' },
+    { id: 'b', title: 'B', lane: 'waiting', changedAt: 5 },
+    { id: 'c', title: 'C', lane: 'needs-you' },
+    { id: 'd', title: 'D', lane: 'moving' },
+  ]
+  expect(sinceYouLooked(looked, after, AWAY_MS)).toBe('since you looked: 1 need you · 2 moved')
+  expect(sinceYouLooked(looked, after, AWAY_MS - 1)).toBeUndefined()
+  expect(sinceYouLooked(looked, before, AWAY_MS)).toBeUndefined()
+  expect(sinceYouLooked(undefined, after, AWAY_MS)).toBeUndefined()
+})
+
+test('back after an hour, the band says what happened since you looked, until you type again', async ($, on) => {
+  mock.env(on, { WATCHMEN: '1' })
+  const seen = engine(on, { '.companion/board.json': serialize([{ id: 'mr', title: 'MR', lane: 'waiting' }]) }, 10)
+  await $.session.start(START)
+  await seen.clock.settle()
+  const typedPrompt = (text: string) => $.prompt.submit({ text, origin: { kind: 'composer' } } as never)
+  await typedPrompt('morning')
+  await $.tool.call({ tool: 'mcp__watchmen__board_move', id: 'mr', lane: 'needs-you', note: 'comments' })
+  await seen.clock.advance(2 * AWAY_MS)
+  expect(JSON.stringify(await (await mountBand($, 120)).drawn())).not.toContain('since you looked')
+  await typedPrompt('back')
+  expect(JSON.stringify(await (await mountBand($, 120)).drawn())).toContain('since you looked: 1 need you · 0 moved')
+  await typedPrompt('ok')
+  expect(JSON.stringify(await (await mountBand($, 120)).drawn())).not.toContain('since you looked')
 })
 
 test('the briefing is the launcher\'s: persona, skill, task model, about-you, handoff', () => {

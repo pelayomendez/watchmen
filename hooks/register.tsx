@@ -38,6 +38,8 @@ import {
   briefHourOf,
   isBriefDue,
   localDay,
+  lanesOf,
+  sinceYouLooked,
   track,
 } from './board'
 import type { CheckOutcome, CheckResult, ItemPatch } from './board'
@@ -753,6 +755,19 @@ export const register: Register = on => {
     return result
   })
 
+  // The person typing in the watch: what they see now is recorded, and, back after an hour or
+  // more, the band says what happened since they last looked, until they type again. Prompts the
+  // plugin or the model submit are not the person looking. No model call.
+  on('prompt.submit', async ($, e, next) => {
+    const kind = e.origin?.kind
+    if ((kind === 'composer' || kind === 'bridge' || kind === 'sdk') && (await isWatch($))) {
+      const now = await $.clock.now()
+      const items = await read($, board)
+      await patchWatch($, held => ({ ...held, sinceNote: sinceYouLooked(held.looked, items, now), looked: { at: now, lanes: lanesOf(items) } }))
+    }
+    return next(e)
+  })
+
   on('turn.start', ($, e, next) => {
     if (e.agentId === undefined) isTurnRunning = true
     return next(e)
@@ -913,7 +928,8 @@ export const register: Register = on => {
     if (watch.isBandHidden || e.props.hasSurvey) return next(e)
     const items = await read($, board)
     const shown = await read($, vitalsAtom)
-    const { parts, hasButtons } = bandLayout(items, e.props.bodyColumns, vitals(shown.percent, shown.idleMs, HANDOFF_AT))
+    const since = watch.sinceNote ? [{ text: watch.sinceNote, color: MASCOT_COLORS.changed }] : []
+    const { parts, hasButtons } = bandLayout(items, e.props.bodyColumns, [...since, ...vitals(shown.percent, shown.idleMs, HANDOFF_AT)])
     const elements = $.ui.resolve(e)
     const { Box, Text, Button } = elements
     const state = mascotState(items)
