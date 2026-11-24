@@ -89,6 +89,8 @@ updates the item `park-<short id>` (kind `session`, waiting or needs-you, a note
 awaiting approval), moves the entry to `inbox/done/`, and wakes the watch. Entries that do not
 validate go to `inbox/rejected/`; entries for other folders stay for their watch.
 
+A watch covers an entry when its workspace holds the entry's folder or, for a git worktree, the repository's main worktree recorded at park time. The parked session says it is parked in watchmen only when a live heartbeat covers it by the same rule; otherwise it suggests a parent folder to start a watch in. Entries no live watch covers, older than a minute, show as a dim line in every watch's band and pane and once in `board_changes`; they are not taken or changed.
+
 All of it is untrusted: types checked, lengths capped, text cleaned and JSON-quoted where the model
 reads it, links http(s) only, the handoff inside the parked folder, a check an array of at most 20
 strings; nothing is approved for the person.
