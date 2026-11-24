@@ -26,6 +26,7 @@ import {
   enteredNeedsYou,
   queueWake,
   sanitize,
+  hasHidden,
   wakePrompt,
   sidebarToken,
   isSafeHerdrArg,
@@ -877,7 +878,20 @@ async function isWatched($: EngineInterface, dir: string, cwd: string, now: numb
  * Once the parked session's turn has ended with its handoff written, the inbox entry goes in and
  * the person is told they can close the session. Gives up after PARK_GIVE_UP_MS.
  */
+// A completion under way: the turn's end and the timer never complete one park twice.
+let isCompletingPark = false
+
 async function checkPark($: EngineInterface) {
+  if (isCompletingPark) return
+  isCompletingPark = true
+  try {
+    await completePark($)
+  } finally {
+    isCompletingPark = false
+  }
+}
+
+async function completePark($: EngineInterface) {
   const park = (await $.state.get(PARK)).value
   if (!park || isTurnRunning) return
   const now = await $.clock.now()
@@ -890,6 +904,8 @@ async function checkPark($: EngineInterface) {
   }
   const dir = await stateDir($)
   if (!dir) return
+  // Cleared before anything else, so this park completes once whatever happens next.
+  await $.state.set(PARK, null)
   const front = parseFrontMatter(text)
   const short = shortId(park.sessionId)
   const isRead = !('error' in front)
@@ -906,8 +922,15 @@ async function checkPark($: EngineInterface) {
     ...(isRead && front.check ? { check: front.check } : {}),
     ...(park.note ? { note: park.note } : {}),
   }
-  await $.fs.write(`${dir}/inbox/${short}.json`, `${JSON.stringify(entry, null, 2)}\n`)
-  await $.state.set(PARK, null)
+  // Written beside the inbox name and moved into place, so the watch never reads half an entry
+  // (it lists only *.json).
+  const final = `${dir}/inbox/${short}.json`
+  await $.fs.write(`${final}.tmp`, `${JSON.stringify(entry, null, 2)}\n`)
+  const moved = await $.process.run(['mv', '-f', `${final}.tmp`, final]).catch(error => ({ exitCode: 1, stderr: String(error) }))
+  if (moved.exitCode !== 0) {
+    $.ui.log(`watchmen: the park entry could not be put in the inbox (${moved.stderr.trim() || `mv exited ${moved.exitCode}`}); nothing was parked. Type /watchmen park to try again.`)
+    return
+  }
   const unread = isRead ? '' : ` (its front matter could not be read: ${front.error}; parked with what it had)`
   const watched = await isWatched($, dir, entry.cwd, now)
   const where = watched ? 'Parked in watchmen. You can close this session.' : 'Parked for watchmen: no watch is running here now, so it will be picked up when the watch starts. You can close this session.'
@@ -940,11 +963,20 @@ async function takeInbox($: EngineInterface, now: number) {
     const path = `${inbox}/${name}`
     const entry = parseInboxEntry(String(await $.fs.read(path).catch(() => '')), `${dir}/parked`)
     if (!entry) {
-      await moveTo($, path, `${inbox}/rejected`, name)
-      $.ui.log(`watchmen: a park inbox entry did not validate and was moved to ${inbox}/rejected/${name}`)
+      const isMoved = await moveTo($, path, `${inbox}/rejected`, name)
+      if (!rejectedSeen.has(path)) {
+        rejectedSeen.add(path)
+        $.ui.log(`watchmen: a park inbox entry did not validate${isMoved ? ` and was moved to ${inbox}/rejected/${name}` : `; ${path} could not be moved aside`}`)
+      }
       continue
     }
     if (!isInside(entry.cwd, cwd)) continue
+    // An entry applied before whose move failed is only moved again, never applied twice.
+    const key = `${entry.sessionId}:${entry.at}`
+    if ((await $.state.get(WATCH)).value?.appliedParks?.includes(key)) {
+      await moveTo($, path, `${inbox}/done`, name)
+      continue
+    }
     const item = parkedItem(entry)
     // An entry only ever writes its own park- item: the id is derived from its session id.
     // Marked changed, so the wake's board_changes reports where it came from.
@@ -954,15 +986,21 @@ async function takeInbox($: EngineInterface, now: number) {
       () => 'parked',
     )
     if ('deny' in answer) continue
-    await moveTo($, path, `${inbox}/done`, name)
+    await patchWatch($, watch => ({ ...watch, appliedParks: [...(watch.appliedParks ?? []).filter(one => one !== key), key].slice(-100) }))
+    if (!(await moveTo($, path, `${inbox}/done`, name))) $.ui.log(`watchmen: ${path} was taken onto the board but could not be moved to ${inbox}/done/`)
     taken.push(item.title)
   }
   if (taken.length > 0) await patchWatch($, watch => ({ ...watch, wake: queueWake(watch.wake ?? { pending: [] }, taken) }))
 }
 
-async function moveTo($: EngineInterface, from: string, folder: string, name: string) {
+// Rejected inbox entries already reported, so one that cannot be moved aside is reported once.
+const rejectedSeen = new Set<string>()
+
+/** Moves an inbox entry into a folder of the inbox; whether it moved. */
+async function moveTo($: EngineInterface, from: string, folder: string, name: string): Promise<boolean> {
   await $.process.run(['mkdir', '-p', folder]).catch(() => undefined)
-  await $.process.run(['mv', '-f', from, `${folder}/${name}`]).catch(() => undefined)
+  const moved = await $.process.run(['mv', '-f', from, `${folder}/${name}`]).catch(() => undefined)
+  return moved?.exitCode === 0
 }
 
 /** The briefing for /watchmen start: the launcher's, built here from the plugin's own persona. */
@@ -1031,6 +1069,10 @@ export const register: Register = on => {
   on('tool.call', { tool: 'mcp__watchmen__board_track' }, async ($, e) => {
     if (!(await isWatch($))) return { deny: NOT_WATCH }
     const patch = patchFrom(e as Record<string, unknown>)
+    // The approval line must show exactly what would run.
+    if (patch.check?.argv.some(hasHidden)) {
+      return { deny: 'A check argument holds control or invisible formatting characters. Write the command in plain characters.' }
+    }
     const before = await read($, board)
     const answer = await change($, items => track(items, patch), items => `Tracked. ${items.length} items on the board.`)
     if ('result' in answer) await pingNeedsYou($, enteredNeedsYou(before, await read($, board)))

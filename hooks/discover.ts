@@ -56,7 +56,7 @@ const clean = (text: string, max = 100) => {
 // A link, only as an http(s) URL without spaces, cleaned like the titles.
 const linkOf = (value: unknown) => {
   const link = str(value)
-  return link && /^https?:\/\/\S+$/.test(link) ? clean(link, 300) : undefined
+  return link && /^https?:\/\/[^\s\p{C}\u2028\u2029]+$/u.test(link) ? clean(link, 300) : undefined
 }
 
 export function parseGh(stdout: string, role: Found['role']): Found[] {

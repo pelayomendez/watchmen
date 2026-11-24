@@ -207,9 +207,22 @@ export function resumePrompt(handoff: string): string {
   return `◆ resumed — the conversation was cleared to keep the watch light. Read ${handoff}, then call board_changes and triage. Speak only if something needs the human.`
 }
 
-/** Removes control characters and DEL, so text from a board.json cannot drive the terminal. */
+/**
+ * Characters that can make shown text differ from what it is: controls, format characters (bidi
+ * overrides, zero-width joiners), unassigned and private-use code points, line and paragraph
+ * separators.
+ */
+export const HIDDEN = /[\p{C}\u2028\u2029]/u
+const HIDDEN_ALL = /[\p{C}\u2028\u2029]/gu
+
+/** Whether text holds any character that could hide or reorder what is shown (HIDDEN). */
+export function hasHidden(text: string): boolean {
+  return HIDDEN.test(text)
+}
+
+/** Whitespace controls become spaces and every other hidden character goes, so shown text is plain. */
 export function sanitize(text: string): string {
-  return text.replace(/[\t\n\r\v\f]/g, ' ').replace(/[\u0000-\u001f\u007f-\u009f]/g, '')
+  return text.replace(/[\t\n\r\v\f\u2028\u2029]/g, ' ').replace(HIDDEN_ALL, '')
 }
 
 /**
@@ -275,11 +288,14 @@ function isItem(one: unknown): one is Item {
   return typeof item.id === 'string' && typeof item.title === 'string' && isLane(item.lane)
 }
 
-/** A check as read from a file: argv must be strings, and an everyMs that is not a number is dropped. */
+/**
+ * A check as read from a file: argv must be strings with no hidden characters (the approval line
+ * must show exactly what runs), and an everyMs that is not a number is dropped.
+ */
 function checkOf(value: unknown): Check | undefined {
   if (typeof value !== 'object' || value === null) return undefined
   const { argv, everyMs } = value as Record<string, unknown>
-  if (!Array.isArray(argv) || argv.length === 0 || !argv.every(one => typeof one === 'string')) return undefined
+  if (!Array.isArray(argv) || argv.length === 0 || !argv.every(one => typeof one === 'string' && !hasHidden(one))) return undefined
   return { argv, ...(typeof everyMs === 'number' && Number.isFinite(everyMs) ? { everyMs } : {}) }
 }
 

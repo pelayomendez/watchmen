@@ -25,6 +25,8 @@ export type Watch = {
   isBriefingPending?: boolean
   /** When the last morning brief failed to go in: the next try waits BRIEF_RETRY_MS. */
   briefFailedAt?: number
+  /** Park inbox entries already applied, as `<sessionId>:<at>`, so one is never applied twice. */
+  appliedParks?: string[]
   /** When the person last typed in the watch, and each item's lane then. */
   looked?: { at: number; lanes: Record<string, Lane> }
   /** What happened while they were away, shown in the band until they type again. */

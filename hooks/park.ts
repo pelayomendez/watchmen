@@ -5,7 +5,7 @@
 // a proposed check waits for the person's approval like any other.
 
 import type { Lane } from '../types'
-import { sanitize } from './board'
+import { hasHidden, sanitize } from './board'
 
 export type ParkLane = 'waiting' | 'todo'
 export const PARK_LANES: readonly ParkLane[] = ['waiting', 'todo']
@@ -21,7 +21,10 @@ export function cleanLine(text: string, max: number): string {
   return one.length > max ? `${one.slice(0, max - 1)}…` : one
 }
 
-const isHttp = (value: string) => /^https?:\/\/\S+$/.test(value) && value.length <= MAX.link
+const isHttp = (value: string) => /^https?:\/\/[^\s\p{C}\u2028\u2029]+$/u.test(value) && value.length <= MAX.link
+
+/** Format characters and separators can make a title read as something else: such text is refused. */
+const isSpoofed = (value: string) => /[\p{Cf}\u2028\u2029]/u.test(value)
 
 /** `/watchmen park [waiting|todo] [free note]`: the lane the person asked for, and their note. */
 export function parseParkArgs(args: string): { lane?: ParkLane; note?: string } {
@@ -35,8 +38,11 @@ export function parseParkArgs(args: string): { lane?: ParkLane; note?: string } 
 export function isSessionId(value: unknown): value is string {
   return typeof value === 'string' && /^[A-Za-z0-9_-]{1,80}$/.test(value)
 }
+// Twelve characters of the session id name its file and its park- item: two sessions colliding
+// there would share one item, the later park updating the earlier's, which 12 hex characters make
+// vanishingly unlikely.
 export function shortId(sessionId: string): string {
-  return sessionId.replace(/[^A-Za-z0-9]/g, '').slice(0, 8).toLowerCase() || 'session'
+  return sessionId.replace(/[^A-Za-z0-9]/g, '').slice(0, 12).toLowerCase() || 'session'
 }
 
 /** Where parked handoffs and the inbox live, under the state dir the launcher already uses. */
@@ -69,7 +75,8 @@ export type FrontMatter = { title: string; lane?: ParkLane; waitingOn?: string; 
 export function checkOf(value: unknown): string[] | undefined {
   const argv = typeof value === 'string' ? (() => { try { return JSON.parse(value) as unknown } catch { return undefined } })() : value
   if (!Array.isArray(argv) || argv.length === 0 || argv.length > MAX.argv) return undefined
-  if (!argv.every(one => typeof one === 'string' && one.length > 0 && one.length <= MAX.arg && !/[\u0000-\u001f\u007f]/.test(one))) return undefined
+  // What the approval line shows must be exactly what runs: no hidden characters at all.
+  if (!argv.every(one => typeof one === 'string' && one.length > 0 && one.length <= MAX.arg && !hasHidden(one))) return undefined
   return argv as string[]
 }
 
@@ -82,10 +89,11 @@ export function parseFrontMatter(text: string): FrontMatter | { error: string } 
     const pair = /^([a-z_]+):[ \t]*(.*)$/.exec(line)
     if (pair && !(pair[1]! in fields)) fields[pair[1]!] = pair[2]!.trim()
   }
+  if (isSpoofed(fields.title ?? '')) return { error: 'the title holds hidden characters' }
   const title = cleanLine(fields.title ?? '', MAX.title)
   if (!title) return { error: 'no title' }
   const lane = PARK_LANES.find(one => one === fields.lane)
-  const waitingOn = cleanLine(fields.waiting_on ?? '', MAX.waitingOn)
+  const waitingOn = isSpoofed(fields.waiting_on ?? '') ? '' : cleanLine(fields.waiting_on ?? '', MAX.waitingOn)
   const link = fields.link && isHttp(fields.link) ? fields.link : undefined
   const check = fields.check ? checkOf(fields.check) : undefined
   return { title, ...(lane ? { lane } : {}), ...(waitingOn ? { waitingOn } : {}), ...(link ? { link } : {}), ...(check ? { check } : {}) }
@@ -121,6 +129,7 @@ export function parseInboxEntry(text: string, parkedDir: string): InboxEntry | u
   if (typeof cwd !== 'string' || !cwd.startsWith('/') || cwd.length > MAX.cwd || /[\u0000-\u001f\u007f]/.test(cwd) || cwd.split('/').includes('..')) return undefined
   if (typeof handoff !== 'string' || !handoff.startsWith(`${parkedDir}/`) || !/^[A-Za-z0-9._-]+\.md$/.test(handoff.slice(parkedDir.length + 1)) || handoff.includes('..')) return undefined
   if (typeof at !== 'number' || !Number.isFinite(at)) return undefined
+  if ([raw.title, raw.note, raw.waitingOn].some(value => typeof value === 'string' && isSpoofed(value))) return undefined
   const title = typeof raw.title === 'string' ? cleanLine(raw.title, MAX.title) : ''
   if (!title) return undefined
   const lane = PARK_LANES.find(one => one === raw.lane) ?? 'todo'

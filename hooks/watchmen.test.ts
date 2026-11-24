@@ -234,6 +234,7 @@ function engine(on: On, files: Record<string, string>, percent: number) {
   on('ui.notify', ($, e) => (notices.push(e.text), { value: { isSent: true, channel: 'terminal_bell' } }) as never)
   const runs: string[][] = []
   const moves: string[][] = []
+  let failMv: RegExp | undefined
   const lookups: string[][] = []
   const clis = new Set<string>()
   const lookupOutputs: Record<string, string> = {}
@@ -243,6 +244,7 @@ function engine(on: On, files: Record<string, string>, percent: number) {
     // The save's rename: the temp file takes board.json's place.
     if (e.argv[0] === 'mv') {
       const [, , from, to] = e.argv as string[]
+      if (failMv && failMv.test(from!)) return { value: { ...PROCESS_OK, exitCode: 1, stderr: 'mv: permission denied', stdout: '' } }
       writes[relative(to!)] = writes[relative(from!)] ?? files[relative(from!)]!
       delete writes[relative(from!)]
       delete files[relative(from!)]
@@ -281,6 +283,7 @@ function engine(on: On, files: Record<string, string>, percent: number) {
     lookups,
     moves,
     files,
+    failMv: (pattern: RegExp | undefined) => (failMv = pattern),
     fills,
     placements,
     setSurfaces: (value: readonly string[]) => (surfaces = value),
@@ -802,7 +805,7 @@ async function parkSession($: Engine, on: On, args: string, files: Record<string
 test('/watchmen park asks the session for its handoff, then puts it in the inbox for the watch', async ($, on) => {
   on('turn.complete', () => ({ text: '' }))
   const { seen, path, turn } = await parkSession($, on, 'waiting ask Florian on Monday')
-  expect(path).toMatch(new RegExp(`^${STATE}/parked/[0-9]{4}-[0-9]{2}-[0-9]{2}-abc12345\\.md$`))
+  expect(path).toMatch(new RegExp(`^${STATE}/parked/[0-9]{4}-[0-9]{2}-[0-9]{2}-abc123456789\\.md$`))
   expect(seen.prompts).toHaveLength(1)
   expect(seen.asUser).toEqual(seen.prompts)
   expect(seen.prompts[0]).toContain(`Write a handoff to ${path}`)
@@ -810,11 +813,13 @@ test('/watchmen park asks the session for its handoff, then puts it in the inbox
   // No file yet: the turn ends and nothing is parked.
   await turn()
   await seen.clock.settle()
-  expect(seen.writes[`${STATE}/inbox/abc12345.json`]).toBeUndefined()
+  expect(seen.writes[`${STATE}/inbox/abc123456789.json`]).toBeUndefined()
   seen.addFile(path, HANDOFF)
   await turn()
   await seen.clock.settle()
-  const entry = JSON.parse(seen.writes[`${STATE}/inbox/abc12345.json`] ?? '{}')
+  const entry = JSON.parse(seen.writes[`${STATE}/inbox/abc123456789.json`] ?? '{}')
+  // Written beside its name and moved into place, never read half-written.
+  expect(seen.moves).toContainEqual([`${STATE}/inbox/abc123456789.json.tmp`, `${STATE}/inbox/abc123456789.json`])
   expect(entry).toMatchObject({
     sessionId: 'abc12345-6789-session',
     cwd: '/w',
@@ -840,14 +845,48 @@ test('a parked session says the watch has it when a watch for its folder beats',
   expect(seen.logs.at(-1)).toBe('Parked in watchmen. You can close this session.')
 })
 
+test('a stale heartbeat, or one for another folder, is no watch', async ($, on) => {
+  on('turn.complete', () => ({ text: '' }))
+  const { seen, path, turn } = await parkSession($, on, '', {
+    [`${STATE}/heartbeat/old.json`]: JSON.stringify({ cwd: '/w', at: -2 * MIN }),
+    [`${STATE}/heartbeat/other.json`]: JSON.stringify({ cwd: '/elsewhere', at: 0 }),
+  })
+  seen.addFile(path, HANDOFF)
+  await turn()
+  await seen.clock.settle()
+  expect(seen.logs.at(-1)).toContain('it will be picked up when the watch starts')
+})
+
+test('a park completes once, even when its turn ends twice at once', async ($, on) => {
+  on('turn.complete', () => ({ text: '' }))
+  const { seen, path, turn } = await parkSession($, on, '')
+  seen.addFile(path, HANDOFF)
+  await Promise.all([turn(), turn()])
+  await seen.clock.settle()
+  await seen.clock.advance(MIN)
+  expect(seen.moves.filter(([from]) => from!.endsWith('.json.tmp'))).toHaveLength(1)
+  expect(seen.logs.filter(line => line.includes('You can close this session'))).toHaveLength(1)
+})
+
+test('a park whose entry cannot be moved into the inbox says nothing was parked', async ($, on) => {
+  on('turn.complete', () => ({ text: '' }))
+  const { seen, path, turn } = await parkSession($, on, '')
+  seen.failMv(/\.json\.tmp$/)
+  seen.addFile(path, HANDOFF)
+  await turn()
+  await seen.clock.settle()
+  expect(seen.logs.at(-1)).toContain('could not be put in the inbox')
+  expect(seen.logs.at(-1)).toContain('nothing was parked')
+})
+
 test('a handoff without readable front matter is still parked, under a plain title, and says so', async ($, on) => {
   on('turn.complete', () => ({ text: '' }))
   const { seen, path, turn } = await parkSession($, on, 'todo')
   seen.addFile(path, '# Handoff\nno front matter here')
   await turn()
   await seen.clock.settle()
-  const entry = JSON.parse(seen.writes[`${STATE}/inbox/abc12345.json`] ?? '{}')
-  expect(entry).toMatchObject({ title: 'Parked session abc12345', lane: 'todo' })
+  const entry = JSON.parse(seen.writes[`${STATE}/inbox/abc123456789.json`] ?? '{}')
+  expect(entry).toMatchObject({ title: 'Parked session abc123456789', lane: 'todo' })
   expect(entry.check).toBeUndefined()
   expect(seen.logs.at(-1)).toContain('front matter could not be read: no front matter')
 })
@@ -872,7 +911,7 @@ const ENTRY = (over: Record<string, unknown> = {}) =>
   JSON.stringify({
     sessionId: 'abc12345-6789-session',
     cwd: '/w/api',
-    handoff: `${STATE}/parked/2026-11-24-abc12345.md`,
+    handoff: `${STATE}/parked/2026-11-24-abc123456789.md`,
     at: 1,
     title: 'Frames import',
     lane: 'waiting',
@@ -886,7 +925,7 @@ test('the watch takes parked sessions for its workspace onto the board, checks a
   const seen = engine(
     on,
     {
-      [`${STATE}/inbox/abc12345.json`]: ENTRY(),
+      [`${STATE}/inbox/abc123456789.json`]: ENTRY(),
       [`${STATE}/inbox/other.json`]: ENTRY({ sessionId: 'zzz', cwd: '/elsewhere' }),
       [`${STATE}/inbox/bad.json`]: ENTRY({ handoff: '/etc/passwd' }),
     },
@@ -896,13 +935,13 @@ test('the watch takes parked sessions for its workspace onto the board, checks a
   await seen.clock.settle()
   // The next tick marks its check as waiting for approval.
   await seen.clock.advance(15_000)
-  const item = savedBoard(seen).find(one => one.id === 'park-abc12345')
+  const item = savedBoard(seen).find(one => one.id === 'park-abc123456789')
   expect(item).toMatchObject({
     kind: 'session',
     lane: 'waiting',
     title: 'Frames import',
     note: 'waiting on Florian · resume: cd /w/api && claude --resume abc12345-6789-session',
-    link: `${STATE}/parked/2026-11-24-abc12345.md`,
+    link: `${STATE}/parked/2026-11-24-abc123456789.md`,
     check: { argv: ['glab', 'mr', 'view', '42'] },
     isAwaitingApproval: true,
   })
@@ -910,7 +949,7 @@ test('the watch takes parked sessions for its workspace onto the board, checks a
   // The check never ran; the entry went to done, the bad one aside, the other workspace's stays.
   expect(seen.runs).toEqual([])
   expect(seen.moves.filter(([from]) => from!.includes('/inbox/'))).toHaveLength(2)
-  expect(seen.moves).toContainEqual([`${STATE}/inbox/abc12345.json`, `${STATE}/inbox/done/abc12345.json`])
+  expect(seen.moves).toContainEqual([`${STATE}/inbox/abc123456789.json`, `${STATE}/inbox/done/abc123456789.json`])
   expect(seen.moves).toContainEqual([`${STATE}/inbox/bad.json`, `${STATE}/inbox/rejected/bad.json`])
   expect(seen.files[`${STATE}/inbox/other.json`]).toBeDefined()
   // The watch is woken, and board_changes says where it came from, quoted.
@@ -919,6 +958,54 @@ test('the watch takes parked sessions for its workspace onto the board, checks a
   // The watch beats for parked sessions to find.
   const heartbeat = Object.keys(seen.writes).find(key => key.startsWith(`${STATE}/heartbeat/`)) ?? ''
   expect(JSON.parse(seen.writes[heartbeat] ?? '{}')).toMatchObject({ cwd: '/w' })
+})
+
+test('the watch applies an entry once, even when it cannot move it to done, and a re-park updates the item', async ($, on) => {
+  mock.env(on, { WATCHMEN: '1', HOME: '/home/u' })
+  const seen = engine(on, { [`${STATE}/inbox/abc123456789.json`]: ENTRY() }, 10)
+  seen.failMv(/\/inbox\/abc123456789\.json$/)
+  await $.session.start(START)
+  await seen.clock.settle()
+  expect(savedBoard(seen).find(one => one.id === 'park-abc123456789')?.isChanged).toBe(true)
+  expect(seen.logs.filter(line => line.includes('could not be moved to'))).toHaveLength(1)
+  // Triaged; the stuck entry is seen again each tick but never applied again.
+  await $.tool.call({ tool: 'mcp__watchmen__board_move', id: 'park-abc123456789', note: 'seen' })
+  await seen.clock.advance(MIN)
+  expect(savedBoard(seen).find(one => one.id === 'park-abc123456789')).toMatchObject({ note: 'seen', isChanged: false })
+  // Moves work again; a later park of the same session updates its one item.
+  seen.failMv(undefined)
+  await seen.clock.advance(15_000)
+  seen.addFile(`${STATE}/inbox/abc123456789.json`, ENTRY({ at: 2, title: 'Frames import, take two', lane: 'todo', waitingOn: undefined }))
+  await seen.clock.advance(15_000)
+  const parked = savedBoard(seen).filter(one => one.id.startsWith('park-'))
+  expect(parked).toHaveLength(1)
+  expect(parked[0]).toMatchObject({ title: 'Frames import, take two', lane: 'needs-you', isChanged: true })
+})
+
+test('a .json.tmp in the inbox is never read', async ($, on) => {
+  mock.env(on, { WATCHMEN: '1', HOME: '/home/u' })
+  const seen = engine(on, { [`${STATE}/inbox/abc123456789.json.tmp`]: '{"sessionId": "abc12345-6789-ses' }, 10)
+  await $.session.start(START)
+  await seen.clock.settle()
+  expect(seen.moves.filter(([from]) => from!.includes('/inbox/'))).toEqual([])
+  expect(savedBoard(seen)).toEqual([])
+})
+
+test('hidden characters: refused in checks everywhere, and in parked titles', async ($, on) => {
+  const rlo = '‮'
+  expect(checkOf(['echo', `safe${rlo}hs.exe`])).toBeUndefined()
+  expect(checkOf(['echo', 'a b'])).toBeUndefined()
+  expect(checkOf(['echo', 'zero​width'])).toBeUndefined()
+  expect(parseFrontMatter(`---\ntitle: Pay${rlo}ments\n---\n`)).toEqual({ error: 'the title holds hidden characters' })
+  expect(parseInboxEntry(ENTRY({ note: `x${rlo}y` }), `${STATE}/parked`)).toBeUndefined()
+  expect(parse(JSON.stringify({ items: [{ id: 'a', title: 'A', lane: 'moving', check: { argv: ['echo', `x${rlo}`] } }] }))[0]?.check).toBeUndefined()
+  mock.env(on, { WATCHMEN: '1' })
+  const seen = engine(on, {}, 10)
+  await $.session.start(START)
+  await seen.clock.settle()
+  const refused = await $.tool.call({ tool: 'mcp__watchmen__board_track', title: 'T', check: { argv: ['echo', `a${rlo}b`] } })
+  expect(refused.deny).toContain('invisible formatting characters')
+  expect(savedBoard(seen)).toEqual([])
 })
 
 test('park data is untrusted: validated, capped and cleaned', () => {
@@ -950,6 +1037,7 @@ test('park data is untrusted: validated, capped and cleaned', () => {
   expect(isInside('/w/api', '/w')).toBe(true)
   expect(isInside('/wx', '/w')).toBe(false)
   expect(shellWord("/w/my dir's")).toBe(`'/w/my dir'\\''s'`)
+  expect(parseFrontMatter('---\ntitle: T\nlink: https://x.example/a\u200bb\n---\n')).toEqual({ title: 'T' })
 })
 
 test('the briefing is the launcher\'s: persona, skill, task model, about-you, handoff', () => {
