@@ -112,14 +112,38 @@ The model's tools are `board_track`, `board_move`, `board_drop` and `board_chang
 
 ## What you see
 
-- **The band**: one slim row above the prompt in the watch session: the mascot, the lane counts (needs you in red, moving in cyan, waiting dim), and two buttons, `board` (opens the board pane; Escape closes it) and `hide` (hidden until `/watchmen band` or the next session). It shortens its words, then drops the buttons and the other counts, as the terminal narrows.
+- **The footer button**, `⚛ watchmen` in the brand blue beside the session's modes, with a red count when something needs you (`⚛ watchmen · 2`). Pressing it opens the board pane with the keyboard; pressed again while the pane is open, it only takes the keyboard back. Escape closes the pane. Only the watch session shows it.
+- **The band**: one slim row above the prompt in the watch session, a glance with nothing to press: the mascot, the lane counts (needs you in red, moving in blue, waiting dim), what happened since you last looked, and the watch's own figures. It shortens its words, then drops the other counts, as the terminal narrows. `/watchmen band` hides it, and again brings it back.
 - **The mascot**: a hydrogen atom, one nucleus, one orbit, one electron (`assets/atom.svg`, drawn for this project), coloured by state: blue when calm, the electron amber when something changed, red when something needs you. Surfaces that draw SVG (the desktop app, the editor) show the picture; a terminal has no SVG element, so there it is the `⚛` glyph in the state's colour.
 
-- **The pane**, `⚛ watchmen`: the lanes with their items, changed ones marked ◆ and bold. It opens by itself beside the transcript in the fullscreen layout; on the main screen, `/watchmen` opens it. Minimized on the desktop app it becomes a widget: the mascot, the counts and the first thing that needs you.
+- **The pane**, `⚛ watchmen`, opened by the footer button or `/watchmen` (and by itself beside the transcript in the fullscreen layout):
+
+  ```
+    ▄▀▄▄▄▄▄▄▄▀▄      watchmen
+    █   ·⊛·   █      Tell it what to watch.
+    █  ◉   ◉  █      It tells you what needs you.
+    ▀▄   ▾   ▄▀
+      ▀▀▙▄▟▀▀        [ brief ] [ + watch ] ↻
+
+  Needs you (2)
+    ◆ mr !42 frames — two review comments
+      todo Update plan v3
+
+  Moving (1)
+      jira Import slice 2/4 — worker running
+        would run: ["acli","jira"]
+        to approve: /watchmen approve ABC-1 88c580cb16ea2e4b
+
+  Waiting (1)
+      jira Backend fields for frames
+        waiting on the backend team to add the new frame fiel…
+  ```
+
+  The owl (a hydrogen atom on its forehead) shows when the pane is wide enough. `brief` puts a request for a brief in the prompt, `+ watch` starts a "Watch …" request, and `↻` runs every check now. Each lane has its colour: needs you red, moving blue, waiting and done dim, done folded into its count past three items. A changed item is marked ◆ in amber; a check waiting for approval shows the exact `/watchmen approve` line. Click an item's title to put `about <id>: ` in the prompt and talk about it. Minimized on the desktop app it becomes a widget: the mascot, the counts and the first thing that needs you.
 - **The watch's own figures**, dim at the end of the band: `42% · idle 12m`, its context fill and how long since its last turn. At 75% they turn into `write the handoff`.
 - **Rotation.** The prompt cache lasts an hour; a wake after that pays to cache the whole conversation again. So when the watch has been idle 50 minutes and its conversation has grown 40k tokens past its fresh start, it writes its handoff, the conversation is cleared, and it resumes from that handoff: the next wake finds a small conversation. A turn that wrote no handoff, or a refused clear, leaves the watch as it was.
 - **Toasts**: one when an item changes, one when the watch runs long.
-- **`/watchmen`** opens the pane and prints the board (outside the watch, `/watchmen start` makes the session the watch); `/watchmen brief` prints it grouped by lane; `/watchmen band` shows a hidden band again; `/watchmen track <title>` adds a todo to needs-you; `/watchmen approve <id> <hash>` lets an item's check run; `/watchmen reload` and `/watchmen reset` recover from an unreadable board.json.
+- **`/watchmen`** opens the pane and prints the board (outside the watch, `/watchmen start` makes the session the watch); `/watchmen brief` prints it grouped by lane; `/watchmen band` hides or shows the band; `/watchmen track <title>` adds a todo to needs-you; `/watchmen approve <id> <hash>` lets an item's check run; `/watchmen reload` and `/watchmen reset` recover from an unreadable board.json.
 
 ## The board outside Claude
 

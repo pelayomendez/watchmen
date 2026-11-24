@@ -16,6 +16,7 @@ watchmen as your assistant, on the desktop too.
 - The watch speaks first: a morning brief once a day at `WATCHMEN_BRIEF_HOUR` (9 by default), and, back after an hour away, the band says "since you looked: N need you · M moved" until you type again.
 - Less board: `/watchmen start` opens the pane as a widget on the desktop and leaves it closed in a terminal.
 - It learns from what you ignore: after two items of a kind dropped while they sat in needs-you, it asks once whether to stop raising that kind and notes the answer in `.companion/about-you.md`.
+- The panel looks and behaves like yatsude's: a `⚛ watchmen` footer button (with a red count when something needs you) opens the board with the keyboard; the band is a glance with no buttons (`/watchmen band` hides or shows it); the pane has the owl, the tagline and `brief`, `+ watch` and `↻` actions, coloured lanes, done folded past three, and item titles you click to talk about them.
 - The README leads with the assistant ("Tell it what to watch. It tells you what needs you.") and has an "On the desktop" section.
 
 ## 0.2.0
