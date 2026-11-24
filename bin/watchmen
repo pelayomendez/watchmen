@@ -105,4 +105,11 @@ fi
 export WATCHMEN=1
 export WATCHMEN_SKILL="$skill"
 
-exec claude --name watchmen --model "$watch_model" --plugin-dir "$ROOT" --append-system-prompt "$briefing" "${@:-Begin the watch.}"
+# Installed as a Claude Code plugin, it already loads in every session: loading it again from this
+# folder would register its hooks twice.
+plugin_args=(--plugin-dir "$ROOT")
+if grep -q '"watchmen@' "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/installed_plugins.json" 2>/dev/null; then
+  plugin_args=()
+fi
+
+exec claude --name watchmen --model "$watch_model" ${plugin_args[@]+"${plugin_args[@]}"} --append-system-prompt "$briefing" "${@:-Begin the watch.}"
