@@ -210,6 +210,8 @@ function engine(on: On, files: Record<string, string>, percent: number) {
   on('ui.render', { component: 'AbovePrompt' }, ($, e) => h($.ui.resolve(e).Box, {}) as never)
   let draft = ''
   on('prompt.read', () => ({ value: { text: draft, cursor: draft.length } }))
+  const fills: string[] = []
+  on('prompt.fill', ($, e) => (fills.push(e.text ?? ''), { isFilled: true, text: e.text, cursor: (e.text ?? '').length }) as never)
   const prompts: string[] = []
   const asUser: string[] = []
   let submitGate: Promise<void> | undefined
@@ -271,6 +273,7 @@ function engine(on: On, files: Record<string, string>, percent: number) {
     failNextSubmit: () => (failNextSubmit = true),
     failNextUsage: () => (failNextUsage = true),
     lookups,
+    fills,
     placements,
     setSurfaces: (value: readonly string[]) => (surfaces = value),
     install: (name: string, outputs: Record<string, string> = {}) => (clis.add(name), Object.assign(lookupOutputs, outputs)),
@@ -660,6 +663,111 @@ test('/watchmen start opens no pane in a terminal with a phone attached', async 
   expect(seen.opened).toEqual([])
 })
 
+type Drawn = { type?: string; props?: Record<string, unknown>; children?: unknown[] } | string
+
+/** A rough text rendering of a drawn tree, for reading a pane as the person would see it. */
+function textOf(node: unknown): string[] {
+  if (typeof node === 'string') return [node]
+  if (!node || typeof node !== 'object') return []
+  const one = node as Exclude<Drawn, string>
+  const kids = (one.children ?? []) as unknown[]
+  const props = one.props ?? {}
+  if (one.type === 'Text') return [kids.flatMap(textOf).join('')]
+  if (one.type === 'Button') return [kids.length > 0 ? kids.flatMap(textOf).join('') : props.plain ? String(props.label) : `[ ${String(props.label)} ]`]
+  let lines: string[]
+  if (props.flexDirection === 'column') {
+    lines = kids.flatMap(textOf)
+  } else {
+    const columns = kids.map(textOf).filter(column => column.length > 0)
+    const height = Math.max(0, ...columns.map(column => column.length))
+    const widths = columns.map((column, at) => Math.max(0, ...column.map(line => line.length)) + Number((kids[at] as Exclude<Drawn, string>)?.props?.marginRight ?? 0))
+    lines = Array.from({ length: height }, (_, row) => columns.map((column, at) => (at === columns.length - 1 ? column[row] ?? '' : (column[row] ?? '').padEnd(widths[at]!))).join(''))
+  }
+  const top = Number(props.marginTop ?? 0)
+  const bottom = Number(props.marginBottom ?? 0)
+  return [...Array(top).fill(''), ...lines, ...Array(bottom).fill('')]
+}
+
+function mountPane($: Engine, bodyColumns: number) {
+  return $.ui.mount({
+    plugin: 'watchmen',
+    surface: 'terminal',
+    component: 'Pane',
+    requestId: 'board',
+    props: { title: '⚛ watchmen', isFocused: true, bodyColumns, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} },
+  })
+}
+
+const PANE_BOARD: Item[] = [
+  { id: 'mr-42', title: '!42 frames', lane: 'needs-you', kind: 'mr', note: 'two review comments', isChanged: true },
+  { id: 'deck', title: 'Update plan v3', lane: 'needs-you', kind: 'todo' },
+  { id: 'ABC-1', title: 'Import slice 2/4', lane: 'moving', kind: 'jira', note: 'worker running', check: { argv: ['acli', 'jira'] }, isAwaitingApproval: true, approvalHash: '0123456789abcdef' },
+  { id: 'be', title: 'Backend fields for frames', lane: 'waiting', kind: 'jira', note: 'waiting on the backend team to add the new frame fields' },
+  { id: 'd1', title: 'Old ticket', lane: 'done' },
+]
+
+test('the pane: owl, name, tagline and actions; lanes with coloured headers; rows to talk about', async ($, on) => {
+  mock.env(on, { WATCHMEN: '1' })
+  const seen = engine(on, { '.companion/board.json': serialize(PANE_BOARD) }, 10)
+  await $.session.start(START)
+  await seen.clock.settle()
+  const pane = await mountPane($, 60)
+  const tree = await pane.drawn()
+  const lines = textOf(tree)
+  ;(globalThis as { console?: { log: (text: string) => void } }).console?.log(`\n--- the pane at 60 columns ---\n${lines.map(line => line.trimEnd()).join('\n')}\n---`)
+  const text = lines.join('\n')
+  expect(text).toContain('▄▀▄▄▄▄▄▄▄▀▄')
+  expect(text).toContain('watchmen')
+  expect(text).toContain('[ brief ] [ + watch ] ↻')
+  expect(text).toContain('Needs you (2)')
+  expect(text).toContain('◆ mr !42 frames — two review comments')
+  expect(text).toMatch(/to approve: \/watchmen approve ABC-1 [0-9a-f]{16}/)
+  // A note too long for the row goes on the next line, indented.
+  expect(lines.some(line => line.startsWith('      waiting on the backend team'))).toBe(true)
+  const drawn = JSON.stringify(tree)
+  expect(drawn).toContain('"color":"#E5484D","dimColor":false},"children":["Needs you (2)"]')
+  expect(drawn).toContain('"color":"#5B8DEF","dimColor":false},"children":["Moving (1)"]')
+  // A title fills the prompt to talk about the item; brief and + watch fill theirs.
+  await pane.press({ key: 'about:mr-42' })
+  await pane.press({ key: 'brief' })
+  await pane.press({ key: 'watch' })
+  expect(seen.fills).toEqual(['about mr-42: ', 'Brief me: what needs me first, then what moved. ', 'Watch '])
+  // Narrow, the owl is left out.
+  await pane.unmount()
+  expect(textOf(await (await mountPane($, 30)).drawn()).join('\n')).not.toContain('▄▀▄▄▄▄▄▄▄▀▄')
+})
+
+test('the pane folds a long done lane into its count, and ↻ runs the checks now', async ($, on) => {
+  mock.env(on, { WATCHMEN: '1' })
+  const done = Array.from({ length: 5 }, (_, at) => ({ id: `d${at}`, title: `Done ${at}`, lane: 'done' as const }))
+  const seen = engine(on, { '.companion/board.json': serialize([{ ...JIRA, check: { argv: ['acli', 'jira'], everyMs: 10 * MIN } }, ...done]) }, 10)
+  await $.session.start(START)
+  await seen.clock.settle()
+  await $.command.run(typed(`approve ABC-1 ${savedBoard(seen)[0]?.approvalHash}`))
+  await seen.clock.advance(15_000)
+  expect(seen.runs).toHaveLength(1)
+  const pane = await mountPane($, 60)
+  const text = textOf(await pane.drawn()).join('\n')
+  expect(text).toContain('Done (5)')
+  expect(text).not.toContain('Done 3')
+  await pane.press({ key: 'check' })
+  await seen.clock.settle()
+  expect(seen.runs).toHaveLength(2)
+})
+
+test('the empty pane: the header, one friendly line, and + watch', async ($, on) => {
+  mock.env(on, { WATCHMEN: '1' })
+  const seen = engine(on, {}, 10)
+  await $.session.start(START)
+  await seen.clock.settle()
+  const pane = await mountPane($, 60)
+  const text = textOf(await pane.drawn()).join('\n')
+  expect(text).toContain('Nothing watched yet. Tell me what to keep an eye on.')
+  expect(text).toContain('[ + watch ]')
+  await pane.press({ key: 'empty-watch' })
+  expect(seen.fills).toEqual(['Watch '])
+})
+
 test('the briefing is the launcher\'s: persona, skill, task model, about-you, handoff', () => {
   const text = briefing({ persona: 'P\n', taskModel: 'opus' })
   const parts = text.split('\n\n')
@@ -885,7 +993,7 @@ test('the model tracks, triages and drops items through the board tools, and the
   const text = JSON.stringify(await pane.drawn())
   expect(text).toContain('Needs you (1)')
   expect(text).toContain('Moving (1)')
-  expect(text).toContain('  • [todo] Update plan …')
+  expect(text).toContain('"label":"Update plan v3…"')
 })
 
 test('the command awaiting approval is shown clean, above the line that approves it', () => {
@@ -1117,19 +1225,19 @@ function mountBand($: Engine, bodyColumns: number) {
   })
 }
 
-test('the band fits its columns: words and buttons when wide, a short count when narrow', async ($, on) => {
+test('the band fits its columns: words when wide, a short count when narrow, never a button', async ($, on) => {
   mock.env(on, { WATCHMEN: '1' })
   const seen = engine(on, { '.companion/board.json': BAND_BOARD }, 10)
   await $.session.start(START)
   await seen.clock.settle()
 
   const wide = JSON.stringify(await (await mountBand($, 100)).drawn())
-  for (const text of ['⚛', '1 need you', '· 1 moving', '· 2 waiting', '"label":"board"', '"label":"hide"', '#E5484D', 'cyan']) expect(wide).toContain(text)
+  for (const text of ['⚛', '1 need you', '· 1 moving', '· 2 waiting', '#E5484D', '#5B8DEF']) expect(wide).toContain(text)
+  expect(wide).not.toContain('"type":"Button"')
 
   const narrow = JSON.stringify(await (await mountBand($, 30)).drawn())
   expect(narrow).toContain('1 need')
   expect(narrow).not.toContain('moving')
-  expect(narrow).not.toContain('"label":"board"')
   expect(BAND_TEXT_FITS(narrow, 30)).toBe(true)
 })
 
@@ -1138,13 +1246,12 @@ function BAND_TEXT_FITS(drawn: string, columns: number): boolean {
   return texts.join('').length <= columns
 }
 
-test('hide hides the band until /watchmen band brings it back', async ($, on) => {
+test('/watchmen band hides the band, and again brings it back', async ($, on) => {
   mock.env(on, { WATCHMEN: '1' })
   const seen = engine(on, { '.companion/board.json': BAND_BOARD }, 10)
   await $.session.start(START)
   await seen.clock.settle()
-  const band = await mountBand($, 100)
-  await band.press({ key: 'hide' })
+  expect((await $.command.run(typed('band'))).text).toContain('The band is hidden')
   const again = JSON.stringify(await (await mountBand($, 100)).drawn())
   expect(again).not.toContain('need you')
   await $.command.run(typed('band'))
@@ -1165,16 +1272,32 @@ test('inside herdr the sidebar tokens go out styled by state: set the live one, 
   ])
 })
 
-test('the band board button opens the board pane', async ($, on) => {
+test('the footer button, only in the watch, opens the board with the keyboard and counts what needs you', async ($, on) => {
   mock.env(on, { WATCHMEN: '1' })
   const seen = engine(on, { '.companion/board.json': BAND_BOARD }, 10)
+  on('ui.render', { component: 'SessionMode' }, ($, e) => h($.ui.resolve(e).Text, {}, 'default') as never)
   await $.session.start(START)
   await seen.clock.settle()
-  const band = await mountBand($, 100)
-  await band.press({ key: 'board' })
-  await seen.clock.settle()
-  expect(seen.opened).toContain('board')
-  expect(seen.logs.some(line => line.includes('{n}'))).toBe(false)
+  const footer = await $.ui.mount({ plugin: 'watchmen', surface: 'terminal', component: 'SessionMode', props: { modes: [] } })
+  const drawn = JSON.stringify(await footer.drawn())
+  expect(drawn).toContain('"plain":true')
+  expect(drawn).toContain('⚛ watchmen')
+  expect(drawn).toContain(' · 1')
+  expect(drawn).toContain('#5B8DEF')
+  await footer.press({ key: 'watchmen-open' })
+  await footer.press({ key: 'watchmen-open' })
+  // Pressed twice, it opened (and focused) the same pane twice: never a toggle, never a log.
+  expect(seen.opened).toEqual(['board', 'board'])
+  expect(seen.logs).toEqual([])
+})
+
+test('outside the watch the footer is left alone', async ($, on) => {
+  mock.env(on, {})
+  engine(on, {}, 10)
+  on('ui.render', { component: 'SessionMode' }, ($, e) => h($.ui.resolve(e).Text, {}, 'default') as never)
+  await $.session.start(START)
+  const footer = await $.ui.mount({ plugin: 'watchmen', surface: 'terminal', component: 'SessionMode', props: { modes: [] } })
+  expect(JSON.stringify(await footer.drawn())).not.toContain('watchmen')
 })
 
 test('an idle watch with a long conversation writes its handoff, clears, and resumes from it', async ($, on) => {

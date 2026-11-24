@@ -20,6 +20,7 @@ import {
   bandLayout,
   mascotState,
   MASCOT_COLORS,
+  BLUE,
   paintAtom,
   sidebarTokens,
   enteredNeedsYou,
@@ -135,14 +136,48 @@ async function sha256(text: string): Promise<string> {
  * execution, and a board.json or a board_track call can come from anyone who can write to the repo
  * or the conversation, so no check runs until the human approves its exact argv here.
  */
-// The band's board button opens the board pane: lanes and items laid out, closed with Escape. A
-// press counts as the person asking, so the pane is placed at any width; should it still not be,
-// the brief goes into the transcript instead. (It cannot run /watchmen: $.command.run from a
-// plugin skips that plugin's own command.run hook, so nothing would answer.)
-async function showBoard($: EngineInterface, items: readonly Item[]): Promise<void> {
-  const opened = await $.ui.open({ id: PANE, title: PANE_TITLE, closeOnEscape: true }).catch(() => undefined)
-  if (!opened?.isPlaced) $.ui.log(summary(items))
+// The footer button and /watchmen open the board pane with the keyboard, closed with Escape. Open
+// again while it is open, it only takes the keyboard back: one way in, never a toggle. A press
+// counts as the person asking, so the pane is placed at any width; should it still not be, the
+// brief goes into the transcript instead. (It cannot run /watchmen: $.command.run from a plugin
+// skips that plugin's own command.run hook, so nothing would answer.)
+async function showBoard($: EngineInterface): Promise<void> {
+  const opened = await $.ui.open({ id: PANE, title: PANE_TITLE, focus: true, closeOnEscape: true }).catch(() => undefined)
+  if (!opened?.isPlaced) $.ui.log(summary(await read($, board)))
 }
+
+/** Puts `text` at the start of the prompt box, keeping what was typed after it (yatsude's fill). */
+async function fill($: EngineInterface, text: string) {
+  const draft = (await $.prompt.read().catch(() => ({ text: '' }))).text
+  const filled = await $.prompt.fill({ text: text + draft.trimStart(), mode: 'replace' }).catch(() => ({ isFilled: false }))
+  if (!filled.isFilled) $.ui.toast(`Could not fill the prompt: type ${text.trim()}`)
+}
+
+/** The pane's ↻: every check on the board runs now, its interval aside (approval still applies). */
+async function checkNow($: EngineInterface) {
+  const now = await $.clock.now()
+  for (const item of await read($, board)) {
+    if (!item.check || item.lane === 'done' || running.has(item.id)) continue
+    void runCheck($, item, now).catch(error => $.ui.log(`watchmen: check ${item.id} failed: ${String(error)}`))
+  }
+}
+
+/** The mascot, block style: an owl with a hydrogen atom on its forehead. Drawn when the pane has room. */
+const OWL = [
+  '  ▄▀▄▄▄▄▄▄▄▀▄    ',
+  '  █   ·⊛·   █    ',
+  '  █  ◉   ◉  █    ',
+  '  ▀▄   ▾   ▄▀    ',
+  '    ▀▀▙▄▟▀▀      ',
+]
+const ART_WIDTH = 17
+const TAGLINE = ['Tell it what to watch.', 'It tells you what needs you.']
+const BRIEF_ASK = 'Brief me: what needs me first, then what moved. '
+const WATCH_ASK = 'Watch '
+const RED = MASCOT_COLORS['needs-you']
+const AMBER = MASCOT_COLORS.changed
+/** Done items listed one by one up to this many; more fold into a count. */
+const DONE_SHOWN = 3
 
 // What the person dismissed unattended, by kind, kept per workspace across sessions.
 async function ignoredKey($: EngineInterface): Promise<string> {
@@ -965,8 +1000,9 @@ export const register: Register = on => {
       return { text: `Approved for this workspace: ${JSON.stringify(item.check.argv)}` }
     }
     if (verb === 'band') {
-      await patchWatch($, held => ({ ...held, isBandHidden: false }))
-      return { text: 'The band is back above the prompt.' }
+      const isHidden = !watch.isBandHidden
+      await patchWatch($, held => ({ ...held, isBandHidden: isHidden }))
+      return { text: isHidden ? 'The band is hidden. /watchmen band brings it back.' : 'The band is back above the prompt.' }
     }
     if (verb === 'reload' || verb === 'reset') {
       const boardError = verb === 'reload' ? await loadBoard($) : undefined
@@ -978,7 +1014,7 @@ export const register: Register = on => {
     }
     const items = await read($, board)
     if (verb === 'brief') return { text: summary(items) }
-    await $.ui.open({ id: PANE, title: PANE_TITLE }).catch(() => undefined)
+    await $.ui.open({ id: PANE, title: PANE_TITLE, focus: true, closeOnEscape: true }).catch(() => undefined)
     const { context } = await $.session.usage()
     const lines = [
       ...(watch.boardError ? [`⚠ board.json could not be read (${watch.boardError}); not saving until /watchmen reload or reset.`, ''] : []),
@@ -991,11 +1027,34 @@ export const register: Register = on => {
     return { text: lines.join('\n') }
   })
 
-  // The board opens by itself only where it docks beside the transcript (the fullscreen layout);
-  // on the main screen it would push the conversation around, so there it waits for /watchmen.
-  // The band: one slim row above the prompt in the watch session, the mascot and the lane counts,
-  // with board and hide. It also opens the board pane by itself where it docks beside the transcript
-  // (the fullscreen layout); on the main screen the pane waits for /watchmen.
+  // The footer button, in the watch session only: the way into the board, with a red count when
+  // something needs the person.
+  on('ui.render', { component: 'SessionMode' }, async ($, e, next) => {
+    if (!(await isWatch($))) return next(e)
+    const { Box, Button, Text } = $.ui.resolve(e)
+    const modes = await next(e)
+    const needs = (await read($, board)).filter(one => one.lane === 'needs-you').length
+    return (
+      <Box gap={1}>
+        {modes}
+        <Button key="watchmen-open" label="watchmen" plain onPress={() => void showBoard($)}>
+          <Text color={BLUE} bold>
+            {'⚛ watchmen'}
+          </Text>
+          {needs > 0 && (
+            <Text color={RED} bold>
+              {` · ${needs}`}
+            </Text>
+          )}
+        </Button>
+      </Box>
+    )
+  })
+
+  // The band: one slim row above the prompt in the watch session, a glance and nothing to press:
+  // the mascot, the lane counts, what happened since the person last looked, the watch's figures.
+  // The footer button and /watchmen open the board. The pane opens by itself only where it docks
+  // beside the transcript (the fullscreen layout); on the main screen it waits to be asked.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const watch = (await $.state.get(WATCH)).value
     if (!watch) return next(e)
@@ -1007,9 +1066,9 @@ export const register: Register = on => {
     const items = await read($, board)
     const shown = await read($, vitalsAtom)
     const since = watch.sinceNote ? [{ text: watch.sinceNote, color: MASCOT_COLORS.changed }] : []
-    const { parts, hasButtons } = bandLayout(items, e.props.bodyColumns, [...since, ...vitals(shown.percent, shown.idleMs, HANDOFF_AT)])
+    const { parts } = bandLayout(items, e.props.bodyColumns, [...since, ...vitals(shown.percent, shown.idleMs, HANDOFF_AT)])
     const elements = $.ui.resolve(e)
-    const { Box, Text, Button } = elements
+    const { Box, Text } = elements
     const state = mascotState(items)
     // Remote surfaces draw the SVG atom; a terminal has no Svg, so there the mascot is the glyph.
     const Svg = 'Svg' in elements ? elements.Svg : undefined
@@ -1025,24 +1084,16 @@ export const register: Register = on => {
             </Text>
           ),
         )}
-        {hasButtons && (
-          <Box key="actions" flexDirection="row">
-            <Text>  </Text>
-            <Button key="board" label="board" onPress={() => void showBoard($, items)} />
-            <Text> </Text>
-            <Button key="hide" label="hide" onPress={() => patchWatch($, held => ({ ...held, isBandHidden: true }))} />
-          </Box>
-        )}
       </Box>
     )
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const elements = $.ui.resolve(e)
-    const { Box, Text } = elements
+    const { Box, Text, Button } = elements
     const items = await read($, board)
     const width = Math.max(10, e.props.bodyColumns)
-    const fit = (text: string) => (text.length > width ? `${text.slice(0, width - 1)}…` : text)
+    const fit = (text: string, room = width) => (room <= 1 ? '…' : text.length > room ? `${text.slice(0, room - 1)}…` : text)
     // Minimized on the desktop app: a glance, the mascot and the counts, then what needs you first.
     if (e.props.placement === 'widget') {
       const state = mascotState(items)
@@ -1065,34 +1116,131 @@ export const register: Register = on => {
         </Box>
       )
     }
+    const watch = (await $.state.get(WATCH)).value
+    const hasArt = width >= ART_WIDTH + 24
+    const header = (
+      <Box key="header" flexDirection="row" marginBottom={1}>
+        {hasArt && (
+          <Box key="art" flexDirection="column" marginRight={2}>
+            {OWL.map((line, at) => (
+              <Text key={`art:${at}`} color={BLUE}>
+                {line}
+              </Text>
+            ))}
+          </Box>
+        )}
+        <Box key="brand" flexDirection="column">
+          <Text key="name" bold color={BLUE}>
+            watchmen
+          </Text>
+          {TAGLINE.map((line, at) => (
+            <Text key={`tag:${at}`} dimColor>
+              {fit(line, width - (hasArt ? ART_WIDTH + 2 : 0))}
+            </Text>
+          ))}
+          <Box key="actions" flexDirection="row" marginTop={1}>
+            <Button key="brief" label="brief" onPress={() => fill($, BRIEF_ASK)} />
+            <Text key="actions:sep1"> </Text>
+            <Button key="watch" label="+ watch" onPress={() => fill($, WATCH_ASK)} />
+            <Text key="actions:sep2"> </Text>
+            <Button key="check" label="↻" plain onPress={() => void checkNow($)} />
+          </Box>
+        </Box>
+      </Box>
+    )
+    const trouble = watch?.boardError ? (
+      <Text key="board-error" color={RED}>
+        {fit(`⚠ board.json could not be read; not saving until /watchmen reload or reset.`)}
+      </Text>
+    ) : null
+
     if (items.length === 0) {
       return (
         <Box flexDirection="column">
-          <Text dimColor>The board is empty.</Text>
-          <Text dimColor>{fit('Ask the watch to track something, or /watchmen track <title>.')}</Text>
+          {header}
+          {trouble}
+          <Text key="empty" dimColor>
+            {fit('Nothing watched yet. Tell me what to keep an eye on.')}
+          </Text>
+          <Box key="empty-actions" flexDirection="row" marginTop={1}>
+            <Button key="empty-watch" label="+ watch" onPress={() => fill($, WATCH_ASK)} />
+          </Box>
         </Box>
       )
     }
+
+    const LANE_COLOR = (lane: (typeof LANES)[number], count: number) =>
+      lane === 'needs-you' ? (count > 0 ? RED : undefined) : lane === 'moving' ? BLUE : undefined
+    const row = (one: Item, isDim: boolean) => {
+      const mark = one.isChanged ? '◆ ' : '  '
+      const tag = one.kind ? `${sanitize(one.kind)} ` : ''
+      const note = one.note ? sanitize(one.note) : ''
+      const lead = 2 + mark.length + tag.length
+      const titleRoom = Math.max(4, width - lead)
+      const title = fit(sanitize(one.title), titleRoom)
+      const isNoteInline = note !== '' && lead + title.length + 3 + note.length <= width
+      return [
+        <Box key={one.id} flexDirection="row">
+          <Text key="mark" color={AMBER} bold>
+            {`  ${mark}`}
+          </Text>
+          {tag && (
+            <Text key="tag" dimColor>
+              {tag}
+            </Text>
+          )}
+          <Button key={`about:${one.id}`} label={title} plain onPress={() => fill($, `about ${one.id}: `)}>
+            <Text bold={one.isChanged} dimColor={isDim}>
+              {title}
+            </Text>
+          </Button>
+          {isNoteInline && (
+            <Text key="note" dimColor>
+              {` — ${note}`}
+            </Text>
+          )}
+        </Box>,
+        ...(note && !isNoteInline
+          ? [
+              <Text key={`${one.id}:note`} dimColor>
+                {fit(`      ${note}`)}
+              </Text>,
+            ]
+          : []),
+        ...(one.checkError && !one.isAwaitingApproval
+          ? [
+              <Text key={`${one.id}:error`} color="yellow">
+                {fit(`      ⚠ check failed: ${sanitize(one.checkError)}`)}
+              </Text>,
+            ]
+          : []),
+        ...approvalLines(one).map((text, at) => (
+          <Text key={`${one.id}:approval:${at}`} color="yellow">
+            {fit(`      ${text}`)}
+          </Text>
+        )),
+      ]
+    }
+
     return (
       <Box flexDirection="column">
+        {header}
+        {trouble}
         {LANES.filter(lane => lane !== 'done' || items.some(one => one.lane === 'done')).map(lane => {
           const inLane = items.filter(one => one.lane === lane)
+          const isFolded = lane === 'done' && inLane.length > DONE_SHOWN
+          const isDimLane = lane === 'waiting' || lane === 'done'
           return (
             <Box key={lane} flexDirection="column" marginBottom={1}>
-              <Text bold color={lane === 'needs-you' && inLane.length > 0 ? 'yellow' : undefined}>
+              <Text key="title" bold color={LANE_COLOR(lane, inLane.length)} dimColor={isDimLane || (lane === 'needs-you' && inLane.length === 0)}>
                 {`${LANE_TITLES[lane]} (${inLane.length})`}
               </Text>
-              {inLane.length === 0 && <Text dimColor>  —</Text>}
-              {inLane.flatMap(one => [
-                <Text key={one.id} bold={one.isChanged} dimColor={lane === 'done'}>
-                  {fit(`  ${itemLine(one)}`)}
-                </Text>,
-                ...approvalLines(one).map((text, at) => (
-                  <Text key={`${one.id}-approval-${at}`} color="yellow">
-                    {fit(`    ${text}`)}
-                  </Text>
-                )),
-              ])}
+              {inLane.length === 0 && (
+                <Text key="none" dimColor>
+                  {'    —'}
+                </Text>
+              )}
+              {!isFolded && inLane.flatMap(one => row(one, lane === 'done'))}
             </Box>
           )
         })}

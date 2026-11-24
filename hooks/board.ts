@@ -361,6 +361,9 @@ export function enteredNeedsYou(before: readonly Item[], after: readonly Item[])
 }
 
 /** The mascot's mood: calm, something changed, or something needs the person. */
+/** The brand's accent: the footer button, the pane's header and the moving lane. */
+export const BLUE = '#5B8DEF'
+
 export type MascotState = 'calm' | 'changed' | 'needs-you'
 
 export function mascotState(items: readonly Item[]): MascotState {
@@ -390,7 +393,7 @@ export type BandPart = { text: string; color?: string; bold?: boolean; dim?: boo
  * The band's counts, fitted to the columns it has: full words when wide, short words when not,
  * and the mascot alone at the narrowest. Answers whether the buttons fit too.
  */
-export function bandLayout(items: readonly Item[], columns: number, extra: readonly BandPart[] = []): { parts: BandPart[]; hasButtons: boolean } {
+export function bandLayout(items: readonly Item[], columns: number, extra: readonly BandPart[] = []): { parts: BandPart[] } {
   const tally = counts(items)
   const state = mascotState(items)
   const mascot: BandPart = { text: '⚛', color: MASCOT_COLORS[state], bold: state === 'needs-you' }
@@ -399,16 +402,14 @@ export function bandLayout(items: readonly Item[], columns: number, extra: reado
     : { need: 'need', moving: 'mov', waiting: 'wait' }
   const counted: BandPart[] = [
     { text: `${tally['needs-you']} ${words.need}`, color: tally['needs-you'] ? MASCOT_COLORS['needs-you'] : undefined, bold: tally['needs-you'] > 0, dim: tally['needs-you'] === 0 },
-    { text: `${tally.moving} ${words.moving}`, color: 'cyan' },
+    { text: `${tally.moving} ${words.moving}`, color: BLUE },
     { text: `${tally.waiting} ${words.waiting}`, dim: true },
   ]
   const line = (parts: BandPart[]) => parts.map(one => one.text).join(' · ').length + 2
-  const hasButtons = columns >= 44
-  const room = columns - (hasButtons ? 18 : 0)
-  if (extra.length > 0 && line([...counted, ...extra]) <= room) return { parts: [mascot, ...counted, ...extra], hasButtons }
-  if (line(counted) <= room) return { parts: [mascot, ...counted], hasButtons }
-  if (columns >= 12) return { parts: [mascot, counted[0]!], hasButtons: false }
-  return { parts: [mascot], hasButtons: false }
+  if (extra.length > 0 && line([...counted, ...extra]) <= columns) return { parts: [mascot, ...counted, ...extra] }
+  if (line(counted) <= columns) return { parts: [mascot, ...counted] }
+  if (columns >= 12) return { parts: [mascot, counted[0]!] }
+  return { parts: [mascot] }
 }
 
 /**
