@@ -6,7 +6,7 @@ import type { Item } from '../types'
 import { AWAY_MS, dismissedQuestion, isDismissed, noteDismissed, lanesOf, sinceYouLooked, applyCheck, applyToBoard, approvalLines, attempt, BRIEF_PROMPT, briefHourOf, isBriefDue, localDay, dueChecks, enteredNeedsYou, glance, MASCOT_COLORS, mascotState, paintAtom, queueWake, SIDEBAR_ROW, sidebarToken, sidebarTokens, wakePrompt, move, parse, parseBoard, serialize, vitals, isRotationDue, ROTATE_IDLE_MS, ROTATE_PROMPT, summary, track } from './board'
 import { newestBackupOf, newestHandoff } from './register'
 import { briefing, pickModel, skillCandidates } from './briefing'
-import { checkOf, isInside, parseFrontMatter, parseInboxEntry, parseParkArgs, parkedItem, shellWord, stateDirOf } from './park'
+import { covers, orphanLine, orphans, parentOf, repoRootOf, shortPath, checkOf, isInside, parseFrontMatter, parseInboxEntry, parseParkArgs, parkedItem, shellWord, stateDirOf } from './park'
 import { foundSection, glabHosts, glabReviewLookup, lookups, staleBefore, notOnBoard, parseGh, parseGlab, parseJira, projectDirName, recentSessions } from './discover'
 
 const MIN = 60_000
@@ -235,6 +235,8 @@ function engine(on: On, files: Record<string, string>, percent: number) {
   const runs: string[][] = []
   const moves: string[][] = []
   let failMv: RegExp | undefined
+  let gitCommonDir: string | undefined
+  const gits: string[][] = []
   const lookups: string[][] = []
   const clis = new Set<string>()
   const lookupOutputs: Record<string, string> = {}
@@ -252,6 +254,10 @@ function engine(on: On, files: Record<string, string>, percent: number) {
       return { value: { ...PROCESS_OK, stdout: '' } }
     }
     if (e.argv[0] === 'mkdir') return { value: { ...PROCESS_OK, stdout: '' } }
+    if (e.argv[0] === 'git') {
+      gits.push([...e.argv])
+      return { value: gitCommonDir ? { ...PROCESS_OK, stdout: `${gitCommonDir}\n` } : { ...PROCESS_OK, exitCode: 128, stdout: '', stderr: 'not a git repository' } }
+    }
     // Discovery: `which` answers from the CLIs the test installed, and the lookups are kept apart
     // from the checks' runs.
     if (e.argv[0] === 'which') return { value: { ...PROCESS_OK, exitCode: clis.has(e.argv[1]!) ? 0 : 1, stdout: '' } }
@@ -284,6 +290,8 @@ function engine(on: On, files: Record<string, string>, percent: number) {
     moves,
     files,
     failMv: (pattern: RegExp | undefined) => (failMv = pattern),
+    gits,
+    setGitCommonDir: (path: string) => (gitCommonDir = path),
     fills,
     placements,
     setSurfaces: (value: readonly string[]) => (surfaces = value),
@@ -871,7 +879,7 @@ test('/watchmen park asks the session for its handoff, then puts it in the inbox
     note: 'ask Florian on Monday',
   })
   // No watch beats here, so it waits for one.
-  expect(seen.logs.at(-1)).toContain('it will be picked up when the watch starts. You can close this session.')
+  expect(seen.logs.at(-1)).toContain('Parked. No watch covers /w yet: start one in a parent folder (for example /) with /watchmen start; it will pick this up. You can close this session.')
   expect(seen.toasts.at(-1)).toContain('You can close this session.')
 })
 
@@ -893,7 +901,7 @@ test('a stale heartbeat, or one for another folder, is no watch', async ($, on) 
   seen.addFile(path, HANDOFF)
   await turn()
   await seen.clock.settle()
-  expect(seen.logs.at(-1)).toContain('it will be picked up when the watch starts')
+  expect(seen.logs.at(-1)).toContain('No watch covers /w yet')
 })
 
 test('a park completes once, even when its turn ends twice at once', async ($, on) => {
@@ -916,6 +924,29 @@ test('a park whose entry cannot be moved into the inbox says nothing was parked'
   await seen.clock.settle()
   expect(seen.logs.at(-1)).toContain('could not be put in the inbox')
   expect(seen.logs.at(-1)).toContain('nothing was parked')
+})
+
+test('parked in a git worktree, the entry carries its repository, and a watch over the repository counts', async ($, on) => {
+  on('turn.complete', () => ({ text: '' }))
+  const repo = '/dev/neuraverse/scenebuilder-frontend'
+  const { seen, path, turn } = await parkSession($, on, '', { [`${STATE}/heartbeat/sb.json`]: JSON.stringify({ cwd: repo, at: 0 }) })
+  seen.setGitCommonDir(`${repo}/.git`)
+  seen.addFile(path, HANDOFF)
+  await turn()
+  await seen.clock.settle()
+  expect(seen.gits[0]).toEqual(['git', 'rev-parse', '--path-format=absolute', '--git-common-dir'])
+  expect(JSON.parse(seen.writes[`${STATE}/inbox/abc123456789.json`] ?? '{}')).toMatchObject({ cwd: '/w', repoRoot: repo })
+  expect(seen.logs.at(-1)).toBe('Parked in watchmen. You can close this session.')
+})
+
+test('parked where no watch covers it, the session says where to start one', async ($, on) => {
+  on('turn.complete', () => ({ text: '' }))
+  const { seen, path, turn } = await parkSession($, on, '')
+  seen.setGitCommonDir('/home/u/neuraverse/scenebuilder-frontend/.git')
+  seen.addFile(path, HANDOFF)
+  await turn()
+  await seen.clock.settle()
+  expect(seen.logs.at(-1)).toContain('Parked. No watch covers /w yet: start one in a parent folder (for example ~/neuraverse) with /watchmen start')
 })
 
 test('a handoff without readable front matter is still parked, under a plain title, and says so', async ($, on) => {
@@ -1021,6 +1052,40 @@ test('the watch applies an entry once, even when it cannot move it to done, and 
   expect(parked[0]).toMatchObject({ title: 'Frames import, take two', lane: 'needs-you', isChanged: true })
 })
 
+test('a watch takes a parked worktree whose repository is in its workspace', async ($, on) => {
+  mock.env(on, { WATCHMEN: '1', HOME: '/home/u' })
+  const seen = engine(on, { [`${STATE}/inbox/abc123456789.json`]: ENTRY({ cwd: '/dev/repo-T1', repoRoot: '/w/repo' }) }, 10)
+  await $.session.start(START)
+  await seen.clock.settle()
+  expect(savedBoard(seen).find(one => one.id === 'park-abc123456789')?.note).toContain('resume: cd /dev/repo-T1 && claude --resume')
+  expect(seen.moves).toContainEqual([`${STATE}/inbox/abc123456789.json`, `${STATE}/inbox/done/abc123456789.json`])
+})
+
+test('a parked session no watch covers is shown in the band and the pane, and board_changes mentions it once', async ($, on) => {
+  mock.env(on, { WATCHMEN: '1', HOME: '/home/u' })
+  const seen = engine(
+    on,
+    {
+      [`${STATE}/inbox/lost.json`]: ENTRY({ sessionId: 'lost', cwd: '/home/u/dev/repo-T1', repoRoot: '/home/u/dev/repo', at: -2 * MIN }),
+      [`${STATE}/inbox/covered.json`]: ENTRY({ sessionId: 'covered', cwd: '/other/x', at: -2 * MIN }),
+      [`${STATE}/inbox/young.json`]: ENTRY({ sessionId: 'young', cwd: '/young/x', at: 0 }),
+      [`${STATE}/heartbeat/other.json`]: JSON.stringify({ cwd: '/other', at: 0 }),
+    },
+    10,
+  )
+  await $.session.start(START)
+  await seen.clock.settle()
+  const line = '1 parked session waits for a watch in ~/dev/repo'
+  expect(JSON.stringify(await (await mountBand($, 200)).drawn())).toContain(line)
+  expect(textOf(await (await mountPane($, 60)).drawn()).join('\n')).toContain(line)
+  const first = (await $.tool.call({ tool: 'mcp__watchmen__board_changes' })).result ?? ''
+  expect(first).toContain(`${line}: tell the human in one sentence`)
+  expect((await $.tool.call({ tool: 'mcp__watchmen__board_changes' })).result).not.toContain('waits for a watch')
+  // Those entries are not this watch's: nothing taken, nothing moved.
+  expect(savedBoard(seen)).toEqual([])
+  expect(seen.moves.filter(([from]) => from!.includes('/inbox/'))).toEqual([])
+})
+
 test('a .json.tmp in the inbox is never read', async ($, on) => {
   mock.env(on, { WATCHMEN: '1', HOME: '/home/u' })
   const seen = engine(on, { [`${STATE}/inbox/abc123456789.json.tmp`]: '{"sessionId": "abc12345-6789-ses' }, 10)
@@ -1045,6 +1110,26 @@ test('hidden characters: refused in checks everywhere, and in parked titles', as
   const refused = await $.tool.call({ tool: 'mcp__watchmen__board_track', title: 'T', check: { argv: ['echo', `a${rlo}b`] } })
   expect(refused.deny).toContain('invisible formatting characters')
   expect(savedBoard(seen)).toEqual([])
+})
+
+test('worktrees, coverage and waiting parks', () => {
+  expect(repoRootOf('/dev/repo/.git\n')).toBe('/dev/repo')
+  expect(repoRootOf('/dev/repo.git')).toBeUndefined()
+  expect(repoRootOf('.git')).toBeUndefined()
+  expect(repoRootOf('/dev/a\u202e/.git')).toBeUndefined()
+  expect(covers('/dev/repo', { cwd: '/dev/repo-T1', repoRoot: '/dev/repo' })).toBe(true)
+  expect(covers('/dev', { cwd: '/dev/repo-T1' })).toBe(true)
+  expect(covers('/dev/repo', { cwd: '/dev/repo-T1' })).toBe(false)
+  expect(parentOf('/dev/repo')).toBe('/dev')
+  expect(parentOf('/dev')).toBe('/')
+  expect(shortPath('/home/u/dev', '/home/u')).toBe('~/dev')
+  expect(shortPath('/home/uu', '/home/u')).toBe('/home/uu')
+  const entry = (cwd: string, at: number) => ({ sessionId: 's', cwd, handoff: 'h', at, title: 't', lane: 'todo' as const })
+  expect(orphans([entry('/a/x', 0), entry('/b/x', 0), entry('/a/y', 59_000)], ['/b'], 60_000).map(one => one.cwd)).toEqual(['/a/x'])
+  expect(orphanLine([entry('/a/x', 0), entry('/a/x', 0), entry('/c', 0), entry('/d', 0)], undefined)).toBe('4 parked sessions wait for a watch in /a/x, /c and 1 more')
+  expect(orphanLine([], undefined)).toBeUndefined()
+  expect(parseInboxEntry(ENTRY({ repoRoot: 'relative' }), `${STATE}/parked`)).toBeUndefined()
+  expect(parseInboxEntry(ENTRY({ repoRoot: '/w/repo' }), `${STATE}/parked`)?.repoRoot).toBe('/w/repo')
 })
 
 test('park data is untrusted: validated, capped and cleaned', () => {

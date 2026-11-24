@@ -27,6 +27,10 @@ export type Watch = {
   briefFailedAt?: number
   /** Park inbox entries already applied, as `<sessionId>:<at>`, so one is never applied twice. */
   appliedParks?: string[]
+  /** Parked sessions no live watch covers: the dim line in the band and the pane. */
+  orphanNote?: string
+  /** The orphan line board_changes last reported, so it is mentioned once. */
+  orphanAnnounced?: string
   /** When the person last typed in the watch, and each item's lane then. */
   looked?: { at: number; lanes: Record<string, Lane> }
   /** What happened while they were away, shown in the band until they type again. */

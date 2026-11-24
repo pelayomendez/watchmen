@@ -67,7 +67,12 @@ import {
 } from './discover'
 import type { Found } from './discover'
 import {
-  isInside,
+  covers,
+  orphanLine,
+  orphans,
+  parentOf,
+  repoRootOf,
+  shortPath,
   PARK_GIVE_UP_MS,
   parkedItem,
   parkedReport,
@@ -887,19 +892,25 @@ async function startPark($: EngineInterface, args: string): Promise<string> {
   return `Parking: this session writes its handoff to ${path}, then it goes to the watch.`
 }
 
-/** Whether a watch whose workspace holds `cwd` has beaten recently. */
-async function isWatched($: EngineInterface, dir: string, cwd: string, now: number): Promise<boolean> {
-  const beats = await $.fs.list(`${dir}/heartbeat`).catch(() => [])
-  for (const one of beats) {
+/** The workspaces of the watches that beat within HEARTBEAT_MS. */
+async function liveWorkspaces($: EngineInterface, dir: string, now: number): Promise<string[]> {
+  const live: string[] = []
+  for (const one of await $.fs.list(`${dir}/heartbeat`).catch(() => [])) {
     if (one.kind !== 'file' || !one.name.endsWith('.json')) continue
     try {
       const beat = JSON.parse(String(await $.fs.read(`${dir}/heartbeat/${one.name}`))) as { cwd?: unknown; at?: unknown }
-      if (typeof beat.cwd === 'string' && typeof beat.at === 'number' && now - beat.at < HEARTBEAT_MS && isInside(cwd, beat.cwd)) return true
+      if (typeof beat.cwd === 'string' && beat.cwd.startsWith('/') && typeof beat.at === 'number' && now - beat.at < HEARTBEAT_MS) live.push(beat.cwd)
     } catch {
       // A heartbeat that does not read is no watch.
     }
   }
-  return false
+  return live
+}
+
+/** The repository a folder belongs to, as its main worktree's root, when it is in one. */
+async function repoRootAt($: EngineInterface, cwd: string): Promise<string | undefined> {
+  const run = await $.process.run(['git', 'rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd, timeoutMs: 5_000 }).catch(() => undefined)
+  return run && run.exitCode === 0 ? repoRootOf(run.stdout) : undefined
 }
 
 /**
@@ -938,9 +949,14 @@ async function completePark($: EngineInterface) {
   const short = shortId(park.sessionId)
   const isRead = !('error' in front)
   const lane = (isRead ? front.lane : undefined) ?? park.lane ?? (isRead && front.waitingOn ? 'waiting' : 'todo')
+  const cwd = await $.session.cwd()
+  // A git worktree beside its repository (repo-TICKET next to repo) is covered by a watch over the
+  // repository's folder too: the entry carries the main worktree's root.
+  const repoRoot = await repoRootAt($, cwd)
   const entry: InboxEntry = {
     sessionId: park.sessionId,
-    cwd: await $.session.cwd(),
+    cwd,
+    ...(repoRoot ? { repoRoot } : {}),
     handoff: park.path,
     at: now,
     title: isRead ? front.title : `Parked session ${short}`,
@@ -960,8 +976,12 @@ async function completePark($: EngineInterface) {
     return
   }
   const unread = isRead ? '' : ` (its front matter could not be read: ${front.error}; parked with what it had)`
-  const watched = await isWatched($, dir, entry.cwd, now)
-  const where = watched ? 'Parked in watchmen. You can close this session.' : 'Parked for watchmen: no watch is running here now, so it will be picked up when the watch starts. You can close this session.'
+  // The same rule the watch takes entries by: a live watch whose workspace holds cwd or repoRoot.
+  const watched = (await liveWorkspaces($, dir, now)).some(workspace => covers(workspace, entry))
+  const home = (await $.env.get('HOME')) || undefined
+  const where = watched
+    ? 'Parked in watchmen. You can close this session.'
+    : `Parked. No watch covers ${shortPath(entry.cwd, home)} yet: start one in a parent folder (for example ${shortPath(parentOf(entry.repoRoot ?? entry.cwd), home)}) with /watchmen start; it will pick this up. You can close this session.`
   $.ui.toast(where, { timeoutMs: 10_000 })
   $.ui.log(`${where}${unread}`)
 }
@@ -984,9 +1004,10 @@ async function takeInbox($: EngineInterface, now: number) {
   if (!dir) return
   const inbox = `${dir}/inbox`
   const names = (await $.fs.list(inbox).catch(() => [])).filter(one => one.kind === 'file' && /^[A-Za-z0-9._-]+\.json$/.test(one.name)).map(one => one.name)
-  if (names.length === 0) return
   const cwd = await $.session.cwd()
   const taken: string[] = []
+  // Entries for other workspaces: left alone, but counted when no live watch covers them.
+  const others: InboxEntry[] = []
   for (const name of names) {
     const path = `${inbox}/${name}`
     const entry = parseInboxEntry(String(await $.fs.read(path).catch(() => '')), `${dir}/parked`)
@@ -998,7 +1019,10 @@ async function takeInbox($: EngineInterface, now: number) {
       }
       continue
     }
-    if (!isInside(entry.cwd, cwd)) continue
+    if (!covers(cwd, entry)) {
+      others.push(entry)
+      continue
+    }
     // An entry applied before whose move failed is only moved again, never applied twice.
     const key = `${entry.sessionId}:${entry.at}`
     if ((await $.state.get(WATCH)).value?.appliedParks?.includes(key)) {
@@ -1019,6 +1043,9 @@ async function takeInbox($: EngineInterface, now: number) {
     taken.push(item.title)
   }
   if (taken.length > 0) await patchWatch($, watch => ({ ...watch, wake: queueWake(watch.wake ?? { pending: [] }, taken) }))
+  const waiting = others.length > 0 ? orphans(others, await liveWorkspaces($, dir, now), now) : []
+  const note = orphanLine(waiting, (await $.env.get('HOME')) || undefined)
+  if ((await $.state.get(WATCH)).value?.orphanNote !== note) await patchWatch($, watch => ({ ...watch, orphanNote: note }))
 }
 
 // Rejected inbox entries already reported, so one that cannot be moved aside is reported once.
@@ -1136,7 +1163,11 @@ export const register: Register = on => {
       const asked = dismissedQuestion(state)
       return asked.line ? { state: asked.state, value: asked.line } : { value: undefined }
     })
-    return { result: line ? `${report}\n\n${line}` : report }
+    const watch = (await $.state.get(WATCH)).value
+    const orphan = watch?.orphanNote && watch.orphanNote !== watch.orphanAnnounced ? watch.orphanNote : undefined
+    if (orphan) await patchWatch($, held => ({ ...held, orphanAnnounced: orphan }))
+    const extra = [line, orphan && `${orphan}: tell the human in one sentence, and that /watchmen start in a folder holding it would take it.`].filter(Boolean)
+    return { result: [report, ...extra].join('\n\n') }
   })
 
   on('command.run', { command: 'watchmen' }, async ($, e) => {
@@ -1299,7 +1330,8 @@ export const register: Register = on => {
     const items = await read($, board)
     const shown = await read($, vitalsAtom)
     const since = watch.sinceNote ? [{ text: watch.sinceNote, color: MASCOT_COLORS.changed }] : []
-    const { parts } = bandLayout(items, e.props.bodyColumns, [...since, ...vitals(shown.percent, shown.idleMs, HANDOFF_AT)])
+    const orphan = watch.orphanNote ? [{ text: watch.orphanNote, dim: true }] : []
+    const { parts } = bandLayout(items, e.props.bodyColumns, [...since, ...orphan, ...vitals(shown.percent, shown.idleMs, HANDOFF_AT)])
     const elements = $.ui.resolve(e)
     const { Box, Text } = elements
     const state = mascotState(items)
@@ -1381,11 +1413,22 @@ export const register: Register = on => {
         </Box>
       </Box>
     )
-    const trouble = watch?.boardError ? (
-      <Text key="board-error" color={RED}>
-        {fit(`⚠ board.json could not be read; not saving until /watchmen reload or reset.`)}
-      </Text>
-    ) : null
+    const trouble = [
+      ...(watch?.boardError
+        ? [
+            <Text key="board-error" color={RED}>
+              {fit(`⚠ board.json could not be read; not saving until /watchmen reload or reset.`)}
+            </Text>,
+          ]
+        : []),
+      ...(watch?.orphanNote
+        ? [
+            <Text key="orphans" dimColor>
+              {fit(watch.orphanNote)}
+            </Text>,
+          ]
+        : []),
+    ]
 
     if (items.length === 0) {
       return (

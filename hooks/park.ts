@@ -102,6 +102,8 @@ export function parseFrontMatter(text: string): FrontMatter | { error: string } 
 export type InboxEntry = {
   sessionId: string
   cwd: string
+  /** The repository's main worktree, when the session ran in a git worktree of it (or the repo itself). */
+  repoRoot?: string
   handoff: string
   at: number
   title: string
@@ -126,7 +128,9 @@ export function parseInboxEntry(text: string, parkedDir: string): InboxEntry | u
   if (!raw || typeof raw !== 'object') return undefined
   const { sessionId, cwd, handoff, at } = raw
   if (!isSessionId(sessionId)) return undefined
-  if (typeof cwd !== 'string' || !cwd.startsWith('/') || cwd.length > MAX.cwd || /[\u0000-\u001f\u007f]/.test(cwd) || cwd.split('/').includes('..')) return undefined
+  if (!isAbsolutePath(cwd)) return undefined
+  if (raw.repoRoot !== undefined && !isAbsolutePath(raw.repoRoot)) return undefined
+  const repoRoot = raw.repoRoot as string | undefined
   if (typeof handoff !== 'string' || !handoff.startsWith(`${parkedDir}/`) || !/^[A-Za-z0-9._-]+\.md$/.test(handoff.slice(parkedDir.length + 1)) || handoff.includes('..')) return undefined
   if (typeof at !== 'number' || !Number.isFinite(at)) return undefined
   if ([raw.title, raw.note, raw.waitingOn].some(value => typeof value === 'string' && isSpoofed(value))) return undefined
@@ -141,6 +145,7 @@ export function parseInboxEntry(text: string, parkedDir: string): InboxEntry | u
   return {
     sessionId,
     cwd,
+    ...(repoRoot ? { repoRoot } : {}),
     handoff,
     at,
     title,
@@ -150,6 +155,53 @@ export function parseInboxEntry(text: string, parkedDir: string): InboxEntry | u
     ...(check ? { check } : {}),
     ...(note ? { note } : {}),
   }
+}
+
+/** An absolute path with no hidden characters and no `..`, of a sane length. */
+export function isAbsolutePath(value: unknown): value is string {
+  return typeof value === 'string' && value.startsWith('/') && value.length <= MAX.cwd && !hasHidden(value) && !value.split('/').includes('..')
+}
+
+/**
+ * The repository's main worktree from `git rev-parse --path-format=absolute --git-common-dir`: the
+ * folder holding the common .git. Undefined for anything else (a bare repository, an error).
+ */
+export function repoRootOf(stdout: string): string | undefined {
+  const common = stdout.trim().replace(/\/+$/, '')
+  if (!isAbsolutePath(common) || !common.endsWith('/.git')) return undefined
+  const root = common.slice(0, -'/.git'.length)
+  return root === '' ? undefined : root
+}
+
+/** Whether a watch in `workspace` covers a parked session: its folder, or its repository, is inside. */
+export function covers(workspace: string, entry: Pick<InboxEntry, 'cwd' | 'repoRoot'>): boolean {
+  return isInside(entry.cwd, workspace) || (entry.repoRoot !== undefined && isInside(entry.repoRoot, workspace))
+}
+
+/** A path with the home folder shown as ~. */
+export function shortPath(path: string, home: string | undefined): string {
+  return home && (path === home || path.startsWith(`${home}/`)) ? `~${path.slice(home.length)}` : path
+}
+
+/** The parent folder of a path ("/" for a top-level one). */
+export function parentOf(path: string): string {
+  return path.replace(/\/+$/, '').replace(/\/[^/]*$/, '') || '/'
+}
+
+/** How long an inbox entry may wait before a watch reports it as waiting for a watch. */
+export const ORPHAN_AFTER_MS = 60_000
+
+/** The parked sessions no live watch covers, waiting at least ORPHAN_AFTER_MS. */
+export function orphans(entries: readonly InboxEntry[], watched: readonly string[], now: number): InboxEntry[] {
+  return entries.filter(entry => now - entry.at >= ORPHAN_AFTER_MS && !watched.some(workspace => covers(workspace, entry)))
+}
+
+/** "1 parked session waits for a watch in ~/x", or undefined when none waits. */
+export function orphanLine(waiting: readonly InboxEntry[], home: string | undefined): string | undefined {
+  if (waiting.length === 0) return undefined
+  const places = [...new Set(waiting.map(entry => shortPath(entry.repoRoot ?? entry.cwd, home)))]
+  const shown = places.slice(0, 2).join(', ') + (places.length > 2 ? ` and ${places.length - 2} more` : '')
+  return waiting.length === 1 ? `1 parked session waits for a watch in ${shown}` : `${waiting.length} parked sessions wait for a watch in ${shown}`
 }
 
 /** Whether `cwd` is the workspace or inside it. */
