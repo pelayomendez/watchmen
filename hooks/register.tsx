@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Item, Lane, Vitals, Watch } from '../types'
+import type { Item, Lane, Park, Vitals, Watch } from '../types'
 import {
   applyToBoard,
   approvalLines,
@@ -63,6 +63,19 @@ import {
   usernameOf,
 } from './discover'
 import type { Found } from './discover'
+import {
+  isInside,
+  PARK_GIVE_UP_MS,
+  parkedItem,
+  parkedReport,
+  parkPrompt,
+  parseFrontMatter,
+  parseInboxEntry,
+  parseParkArgs,
+  shortId,
+  stateDirOf,
+} from './park'
+import type { InboxEntry } from './park'
 
 // Watchmen keeps the watch in one session: the one the launcher starts (WATCHMEN=1, the briefing
 // as --append-system-prompt), or one where the person types /watchmen start (the desktop app can
@@ -85,13 +98,13 @@ const NOT_WATCH = 'Watchmen is not keeping the watch in this session.'
 const HOW_TO_START = `${NOT_WATCH} Type /watchmen start to make this session the watch.`
 const COMMAND_IDLE = {
   name: 'watchmen',
-  description: 'Start the watch in this session: /watchmen start',
-  argumentHint: 'start',
+  description: 'Start the watch in this session (start), or hand this session to the watch (park)',
+  argumentHint: 'start | park [waiting|todo] [note]',
 }
 const COMMAND_WATCH = {
   name: 'watchmen',
   description: 'The watch: open the board, or track <title> | brief | band | approve <id> <hash> | reload | reset',
-  argumentHint: '[track <title> | brief | band | approve <id> <hash> | reload | reset]',
+  argumentHint: '[track <title> | brief | band | approve <id> <hash> | approve all | reload | reset]',
 }
 // Who may turn a session into the watch: the person, typing (in a terminal, through the bridge, or
 // in a session an SDK host such as the desktop app runs), never the model or another plugin.
@@ -99,6 +112,9 @@ const STARTERS: readonly string[] = ['composer', 'bridge', 'sdk']
 
 const WATCH = { plugin: 'watchmen', key: 'watch' } as const
 const VITALS = { plugin: 'watchmen', key: 'vitals' } as const
+const PARK = { plugin: 'watchmen', key: 'park' } as const
+// How fresh a watch's heartbeat must be for a parked session to say the watch has it.
+const HEARTBEAT_MS = 60_000
 const board = atom({ plugin: 'watchmen', key: 'board' } as const, [])
 const vitalsAtom = atom({ plugin: 'watchmen', key: 'vitals' } as const, {} as Vitals)
 
@@ -604,6 +620,8 @@ async function tick($: EngineInterface) {
     void runCheck($, item, now).catch(error => $.ui.log(`watchmen: check ${item.id} failed: ${String(error)}`))
   }
   if (watch.herdr) void publishSidebar($, watch.herdr, items)
+  await takeInbox($, now).catch(error => $.ui.log(`watchmen: could not read the park inbox: ${String(error)}`))
+  await beat($, now).catch(() => undefined)
   if (!watch.rotation) await maybeWake($, now)
   if (!watch.rotation) await maybeBrief($, now)
   const { context } = await $.session.usage()
@@ -808,6 +826,145 @@ async function discover($: EngineInterface): Promise<string | undefined> {
   return foundSection(notOnBoard(found, await read($, board)), await recentClaudeSessions($))
 }
 
+// ---- Park: a session hands its work to the watch.
+
+async function stateDir($: EngineInterface): Promise<string | undefined> {
+  return stateDirOf((await $.env.get('XDG_STATE_HOME')) || undefined, (await $.env.get('HOME')) || undefined)
+}
+
+// This environment's park timer, so a second /watchmen park does not start another.
+let isParkTicking = false
+
+/** /watchmen park in a session that is not the watch: ask for the handoff, then wait for it. */
+async function startPark($: EngineInterface, args: string): Promise<string> {
+  if ((await $.state.get(PARK)).value) return 'This session is already being parked: its handoff is on the way.'
+  const dir = await stateDir($)
+  if (!dir) return 'Cannot park: neither XDG_STATE_HOME nor HOME is set, so there is nowhere to keep the handoff.'
+  const sessionId = await $.session.id()
+  const now = await $.clock.now()
+  const path = `${dir}/parked/${localDay(now).day}-${shortId(sessionId)}.md`
+  const before = (await $.fs.exists(path)) ? String(await $.fs.read(path).catch(() => '')) : undefined
+  const { lane, note } = parseParkArgs(args)
+  const park: Park = { path, sessionId, since: now, ...(before !== undefined ? { before } : {}), ...(lane ? { lane } : {}), ...(note ? { note } : {}) }
+  await $.state.set(PARK, park)
+  // A command.run hook cannot submit a prompt: a timer sends it once the command has answered.
+  $.clock.after(0, () => {
+    void $.prompt.submit({ text: parkPrompt(path, lane, note), asUser: true }).catch(error => $.ui.log(`watchmen: the park request was not sent: ${String(error)}`))
+  })
+  if (!isParkTicking) {
+    isParkTicking = true
+    $.clock.every(TICK_MS, () => void checkPark($).catch(error => $.ui.log(`watchmen: park failed: ${String(error)}`)))
+  }
+  return `Parking: this session writes its handoff to ${path}, then it goes to the watch.`
+}
+
+/** Whether a watch whose workspace holds `cwd` has beaten recently. */
+async function isWatched($: EngineInterface, dir: string, cwd: string, now: number): Promise<boolean> {
+  const beats = await $.fs.list(`${dir}/heartbeat`).catch(() => [])
+  for (const one of beats) {
+    if (one.kind !== 'file' || !one.name.endsWith('.json')) continue
+    try {
+      const beat = JSON.parse(String(await $.fs.read(`${dir}/heartbeat/${one.name}`))) as { cwd?: unknown; at?: unknown }
+      if (typeof beat.cwd === 'string' && typeof beat.at === 'number' && now - beat.at < HEARTBEAT_MS && isInside(cwd, beat.cwd)) return true
+    } catch {
+      // A heartbeat that does not read is no watch.
+    }
+  }
+  return false
+}
+
+/**
+ * Once the parked session's turn has ended with its handoff written, the inbox entry goes in and
+ * the person is told they can close the session. Gives up after PARK_GIVE_UP_MS.
+ */
+async function checkPark($: EngineInterface) {
+  const park = (await $.state.get(PARK)).value
+  if (!park || isTurnRunning) return
+  const now = await $.clock.now()
+  const text = (await $.fs.exists(park.path)) ? String(await $.fs.read(park.path).catch(() => '')) : undefined
+  if (text === undefined || text === '' || text === park.before) {
+    if (now - park.since < PARK_GIVE_UP_MS) return
+    await $.state.set(PARK, null)
+    $.ui.log(`watchmen: no handoff appeared at ${park.path} within ten minutes, so nothing was parked. Type /watchmen park to try again.`)
+    return
+  }
+  const dir = await stateDir($)
+  if (!dir) return
+  const front = parseFrontMatter(text)
+  const short = shortId(park.sessionId)
+  const isRead = !('error' in front)
+  const lane = (isRead ? front.lane : undefined) ?? park.lane ?? (isRead && front.waitingOn ? 'waiting' : 'todo')
+  const entry: InboxEntry = {
+    sessionId: park.sessionId,
+    cwd: await $.session.cwd(),
+    handoff: park.path,
+    at: now,
+    title: isRead ? front.title : `Parked session ${short}`,
+    lane,
+    ...(isRead && front.waitingOn ? { waitingOn: front.waitingOn } : {}),
+    ...(isRead && front.link ? { link: front.link } : {}),
+    ...(isRead && front.check ? { check: front.check } : {}),
+    ...(park.note ? { note: park.note } : {}),
+  }
+  await $.fs.write(`${dir}/inbox/${short}.json`, `${JSON.stringify(entry, null, 2)}\n`)
+  await $.state.set(PARK, null)
+  const unread = isRead ? '' : ` (its front matter could not be read: ${front.error}; parked with what it had)`
+  const watched = await isWatched($, dir, entry.cwd, now)
+  const where = watched ? 'Parked in watchmen. You can close this session.' : 'Parked for watchmen: no watch is running here now, so it will be picked up when the watch starts. You can close this session.'
+  $.ui.toast(where, { timeoutMs: 10_000 })
+  $.ui.log(`${where}${unread}`)
+}
+
+/** The watch's heartbeat: parked sessions read it to say whether a watch has them. */
+async function beat($: EngineInterface, now: number) {
+  const dir = await stateDir($)
+  if (!dir) return
+  const cwd = await $.session.cwd()
+  await $.fs.write(`${dir}/heartbeat/${(await sha256(cwd)).slice(0, 16)}.json`, JSON.stringify({ cwd, at: now }))
+}
+
+/**
+ * The watch takes parked sessions for its workspace off the inbox: each becomes (or updates) its
+ * own park-<id> item, its check awaiting approval, and wakes the watch. Entries for other
+ * workspaces are left for their watch; entries that do not validate are moved aside.
+ */
+async function takeInbox($: EngineInterface, now: number) {
+  const dir = await stateDir($)
+  if (!dir) return
+  const inbox = `${dir}/inbox`
+  const names = (await $.fs.list(inbox).catch(() => [])).filter(one => one.kind === 'file' && /^[A-Za-z0-9._-]+\.json$/.test(one.name)).map(one => one.name)
+  if (names.length === 0) return
+  const cwd = await $.session.cwd()
+  const taken: string[] = []
+  for (const name of names) {
+    const path = `${inbox}/${name}`
+    const entry = parseInboxEntry(String(await $.fs.read(path).catch(() => '')), `${dir}/parked`)
+    if (!entry) {
+      await moveTo($, path, `${inbox}/rejected`, name)
+      $.ui.log(`watchmen: a park inbox entry did not validate and was moved to ${inbox}/rejected/${name}`)
+      continue
+    }
+    if (!isInside(entry.cwd, cwd)) continue
+    const item = parkedItem(entry)
+    // An entry only ever writes its own park- item: the id is derived from its session id.
+    // Marked changed, so the wake's board_changes reports where it came from.
+    const answer = await change(
+      $,
+      items => track(items, item, item.lane).map(one => (one.id === item.id ? { ...one, isChanged: true, last: parkedReport(entry) } : one)),
+      () => 'parked',
+    )
+    if ('deny' in answer) continue
+    await moveTo($, path, `${inbox}/done`, name)
+    taken.push(item.title)
+  }
+  if (taken.length > 0) await patchWatch($, watch => ({ ...watch, wake: queueWake(watch.wake ?? { pending: [] }, taken) }))
+}
+
+async function moveTo($: EngineInterface, from: string, folder: string, name: string) {
+  await $.process.run(['mkdir', '-p', folder]).catch(() => undefined)
+  await $.process.run(['mv', '-f', from, `${folder}/${name}`]).catch(() => undefined)
+}
+
 /** The briefing for /watchmen start: the launcher's, built here from the plugin's own persona. */
 async function startBriefing($: EngineInterface, watch: Watch): Promise<string> {
   const persona = await $.fs.read(`${$.plugin.root}/prompts/persona.md`).catch(() => '')
@@ -862,6 +1019,7 @@ export const register: Register = on => {
   on('turn.complete', async ($, e, next) => {
     if (e.agentId === undefined) {
       isTurnRunning = false
+      void checkPark($).catch(error => $.ui.log(`watchmen: park failed: ${String(error)}`))
       if ((await $.state.get(WATCH)).value) {
         const now = await $.clock.now()
         await patchWatch($, held => ({ ...held, lastTurnAt: now }))
@@ -950,6 +1108,11 @@ export const register: Register = on => {
         if (found) void $.prompt.submit({ text: found }).catch(error => $.ui.log(`watchmen: what discovery found was not sent: ${String(error)}`))
       })
       return { text: 'This session keeps the watch now. The briefing goes in as the first message.' }
+    }
+    if (verb === 'park') {
+      if (!STARTERS.includes(e.origin.kind)) return { text: 'Only you can park a session: type /watchmen park yourself.' }
+      if (watch) return { text: 'This session keeps the watch: park the sessions beside it.' }
+      return { text: await startPark($, rest.join(' ')) }
     }
     if (!watch) return { text: HOW_TO_START }
     if (verb === 'track') {

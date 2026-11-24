@@ -31,6 +31,17 @@ export type Watch = {
   sinceNote?: string
 }
 
+/** A /watchmen park under way in this session: the handoff it waits for, and since when. */
+export type Park = {
+  path: string
+  sessionId: string
+  since: number
+  /** The handoff's text when park began, if the file was already there: a rewrite is what counts. */
+  before?: string
+  lane?: 'waiting' | 'todo'
+  note?: string
+}
+
 /** What the band shows of the watch itself: its context fill and how long it has been idle. */
 export type Vitals = { percent?: number; idleMs?: number }
 
@@ -72,6 +83,6 @@ export type Item = {
 
 declare module 'claude-code' {
   interface PluginState {
-    watchmen: { watch: Watch; board: Item[]; vitals: Vitals }
+    watchmen: { watch: Watch; board: Item[]; vitals: Vitals; park: Park | null }
   }
 }
