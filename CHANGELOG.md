@@ -5,6 +5,8 @@ Releases are tagged `watchmen--v<version>` (Claude Code) and `v<version>` (herdr
 ## Unreleased
 
 - `/watchmen park [waiting|todo] [note]` hands any session to the watch: the session writes a handoff with a small front matter, the plugin puts it in an inbox under the state folder, and the watch for that folder takes it onto the board as a `session` item with the command to resume it. Its proposed check waits for your approval; everything in it is validated as untrusted.
+- Discovery leaves out pull and merge requests idle for 60 days, and asks each GitLab host in glab's config by name (`glab api --hostname`), so a glab set up for a company host finds its MRs.
+- Park and checks refuse hidden characters (format, bidi and other invisible code points) in commands and parked titles, so an approval line shows exactly what runs.
 
 ## 0.3.0
 
