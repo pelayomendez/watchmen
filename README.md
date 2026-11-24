@@ -76,6 +76,22 @@ That session becomes the watch: it loads the board, opens the board pane as a sm
 - **It speaks first.** Once a day, at 9 or at `WATCHMEN_BRIEF_HOUR`, it gives you the day's brief without being asked, unless you are typing or it is busy. Come back after an hour or more and the band says what happened meanwhile, "since you looked: 1 need you · 3 moved", until you type again.
 - **It learns from what you ignore.** When you have it drop two items of the same kind while they sat in needs-you (taking one to done is ordinary triage and never counts), it asks you once whether to stop raising that kind, and notes your answer in `.companion/about-you.md`.
 
+## Park a session
+
+Done for now with a session, but its work waits on someone? Type `/watchmen park` in it, from any session, and close it once it says so:
+
+```
+/watchmen park                      # the session decides: waiting if it waits on something, else a todo
+/watchmen park waiting ask Ana Monday
+/watchmen park todo
+```
+
+1. The session writes a handoff to `${XDG_STATE_HOME:-~/.local/state}/watchmen/parked/<date>-<session>.md`: what is done, what is left, what it waits on and from whom, how to resume. A short front matter on top gives its title, lane, what it waits on, a link, and optionally a check command that tells when the wait is over.
+2. When that turn ends with the file written, the plugin drops an entry in `…/watchmen/inbox/` and says `Parked in watchmen. You can close this session.` (or that the watch will pick it up when it starts, if none runs for that folder). It gives up after ten minutes without a handoff.
+3. The watch for that folder (or one above it) takes the entry onto the board as a `session` item, in waiting or needs-you, its note ending with the command to resume it (`cd <folder> && claude --resume <session id>`), its link the handoff. It tells you in a sentence what was parked. When the check says the wait is over, the item moves to needs-you with the resume command. The watch never starts a session itself.
+
+What a parked session writes is treated as untrusted: titles and notes are cleaned and capped, links must be http(s), the handoff must sit in the parked folder, and a proposed check waits for your `/watchmen approve` like any other. An entry only ever writes its own `park-…` item.
+
 ## It remembers you
 
 The watch keeps your standing preferences in `.companion/about-you.md`, one line each: "CI flakes don't matter", "comments from the design team do", "brief me at 9 in three lines". It reads the file when the watch begins, and adds or edits a line when you correct how it reports or tell it what matters to you. It never writes secrets, credentials or anything about other people there. The file is yours: edit it by hand whenever you like.

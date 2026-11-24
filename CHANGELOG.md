@@ -2,6 +2,10 @@
 
 Releases are tagged `watchmen--v<version>` (Claude Code) and `v<version>` (herdr `--ref`).
 
+## Unreleased
+
+- `/watchmen park [waiting|todo] [note]` hands any session to the watch: the session writes a handoff with a small front matter, the plugin puts it in an inbox under the state folder, and the watch for that folder takes it onto the board as a `session` item with the command to resume it. Its proposed check waits for your approval; everything in it is validated as untrusted.
+
 ## 0.3.0
 
 watchmen as your assistant, on the desktop too.

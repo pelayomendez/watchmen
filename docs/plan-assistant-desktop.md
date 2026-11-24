@@ -73,6 +73,26 @@ After the first try the owner called it "a session with a todo list". Four chang
 Security stays as it was: the lookups are fixed and read-only, and nothing found runs a check until
 the person approves it.
 
+### 6. Park a session: `/watchmen park`
+
+From any session, `/watchmen park [waiting|todo] [note]` hands the work to the watch so the session
+can be closed. The plugin asks the session (from a timer, as a command hook cannot submit) to write
+a handoff to `${XDG_STATE_HOME:-~/.local/state}/watchmen/parked/<date>-<short id>.md`, front matter
+first: title, lane, waiting_on, link, check. Once a turn ends with that file written (or ten minutes
+pass, and it gives up), it writes `…/watchmen/inbox/<short id>.json` with the session id, folder,
+handoff and the parsed fields, and tells the person they can close the session; a watch heartbeat
+under `…/watchmen/heartbeat/` tells it whether a watch has that folder now.
+
+Each tick the watch reads the inbox, takes the entries whose folder is inside its own, and adds or
+updates the item `park-<short id>` (kind `session`, waiting or needs-you, a note ending with
+`resume: cd <folder> && claude --resume <session id>`, the handoff as link, the proposed check
+awaiting approval), moves the entry to `inbox/done/`, and wakes the watch. Entries that do not
+validate go to `inbox/rejected/`; entries for other folders stay for their watch.
+
+All of it is untrusted: types checked, lengths capped, text cleaned and JSON-quoted where the model
+reads it, links http(s) only, the handoff inside the parked folder, a check an array of at most 20
+strings; nothing is approved for the person.
+
 ## Out of scope for now
 
 Phone/Telegram, a separate menu-bar app, choosing another model provider.
