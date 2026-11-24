@@ -18,14 +18,64 @@ export const RECENT_SESSION_MS = 3 * 3_600_000
 const GH_FIELDS = 'number,title,url,repository'
 const JIRA_JQL = "assignee = currentUser() AND statusCategory = 'In Progress'"
 
-/** The lookups, by argv: read-only searches, no shell. */
-export const LOOKUPS = {
-  ghAuthored: ['gh', 'search', 'prs', '--author', '@me', '--state', 'open', '--json', GH_FIELDS, '--limit', '10'],
-  ghReview: ['gh', 'search', 'prs', '--review-requested', '@me', '--state', 'open', '--json', GH_FIELDS, '--limit', '10'],
-  glabUser: ['glab', 'api', 'user'],
-  glabAuthored: ['glab', 'api', 'merge_requests?state=opened&scope=created_by_me&per_page=10'],
-  jira: ['acli', 'jira', 'workitem', 'search', '--jql', JIRA_JQL, '--fields', 'key,summary', '--limit', '10', '--json'],
-} as const
+/** Pull and merge requests not updated for this long are left out: open but abandoned. */
+export const STALE_AFTER_DAYS = 60
+
+/** The UTC day STALE_AFTER_DAYS before `now`, as YYYY-MM-DD. */
+export function staleBefore(now: number): string {
+  return new Date(now - STALE_AFTER_DAYS * 86_400_000).toISOString().slice(0, 10)
+}
+
+/** The lookups, by argv: read-only searches, no shell, only what moved in the last 60 days. */
+export function lookups(now: number) {
+  const since = staleBefore(now)
+  return {
+    ghAuthored: ['gh', 'search', 'prs', '--author', '@me', '--state', 'open', '--updated', `>=${since}`, '--json', GH_FIELDS, '--limit', '10'],
+    ghReview: ['gh', 'search', 'prs', '--review-requested', '@me', '--state', 'open', '--updated', `>=${since}`, '--json', GH_FIELDS, '--limit', '10'],
+    jira: ['acli', 'jira', 'workitem', 'search', '--jql', JIRA_JQL, '--fields', 'key,summary', '--limit', '10', '--json'],
+  }
+}
+
+/** The GitLab lookups for one host (glab's default host when none is named). */
+export function glabLookups(host: string | undefined, now: number): { user: string[]; authored: string[] } {
+  const on = host ? ['--hostname', host] : []
+  return {
+    user: ['glab', 'api', ...on, 'user'],
+    authored: ['glab', 'api', ...on, `merge_requests?state=opened&scope=created_by_me&updated_after=${staleBefore(now)}T00:00:00Z&per_page=10`],
+  }
+}
+
+/** At most this many GitLab hosts are asked. */
+export const GLAB_HOSTS_MAX = 3
+
+/**
+ * The hosts in glab's config.yml, read from the keys under `hosts:` only (tokens are never kept or
+ * shown): gitlab.com only when it has a token of its own, at most GLAB_HOSTS_MAX.
+ */
+export function glabHosts(text: string): string[] {
+  const lines = text.split(/\r?\n/)
+  const start = lines.findIndex(line => /^hosts:\s*$/.test(line))
+  if (start === -1) return []
+  const hosts: { name: string; hasToken: boolean }[] = []
+  let hostIndent: number | undefined
+  for (const line of lines.slice(start + 1)) {
+    if (line.trim() === '' || line.trim().startsWith('#')) continue
+    const indent = line.length - line.trimStart().length
+    if (indent === 0) break
+    hostIndent ??= indent
+    const key = /^\s*"?([^":\s]+)"?:\s*(.*)$/.exec(line)
+    if (!key) continue
+    if (indent === hostIndent) hosts.push({ name: key[1]!, hasToken: false })
+    else if (indent > hostIndent && key[1] === 'token' && hosts.length > 0) {
+      const value = key[2]!.trim()
+      hosts[hosts.length - 1]!.hasToken = value !== '' && value !== '""' && value !== "''" && value !== '!!null' && value !== 'null'
+    }
+  }
+  return hosts
+    .filter(one => /^[A-Za-z0-9.-]{1,253}$/.test(one.name) && (one.name !== 'gitlab.com' || one.hasToken))
+    .map(one => one.name)
+    .slice(0, GLAB_HOSTS_MAX)
+}
 
 /** The username `glab api user` answers, if it answered one. */
 export function usernameOf(stdout: string): unknown {
@@ -33,9 +83,10 @@ export function usernameOf(stdout: string): unknown {
 }
 
 /** The reviewer lookup, only for a username that is safe to put in a URL as it is. */
-export function glabReviewLookup(username: unknown): string[] | undefined {
+export function glabReviewLookup(username: unknown, host: string | undefined, now: number): string[] | undefined {
   if (typeof username !== 'string' || !/^[A-Za-z0-9._-]{1,64}$/.test(username)) return undefined
-  return ['glab', 'api', `merge_requests?state=opened&scope=all&reviewer_username=${username}&per_page=10`]
+  const on = host ? ['--hostname', host] : []
+  return ['glab', 'api', ...on, `merge_requests?state=opened&scope=all&reviewer_username=${username}&updated_after=${staleBefore(now)}T00:00:00Z&per_page=10`]
 }
 
 function json(text: string): unknown {

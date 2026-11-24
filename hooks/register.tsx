@@ -52,8 +52,10 @@ import { briefing, pickModel, skillCandidates } from './briefing'
 import {
   DISCOVERY_TIMEOUT_MS,
   foundSection,
+  glabHosts,
+  glabLookups,
   glabReviewLookup,
-  LOOKUPS,
+  lookups as lookupsAt,
   notOnBoard,
   parseGh,
   parseGlab,
@@ -806,23 +808,49 @@ async function recentClaudeSessions($: EngineInterface): Promise<{ count: number
  * First-run discovery: the fixed, read-only lookups (discover.ts), each only where its CLI is
  * installed, failures ignored. Answers the briefing's "Found" section, or undefined.
  */
+/**
+ * The GitLab hosts glab is set up for, from its config.yml (only the host names: tokens are never
+ * read out or shown). glab run directly uses its default host, so each host is asked by name.
+ */
+async function glabConfigHosts($: EngineInterface): Promise<string[]> {
+  const home = (await $.env.get('HOME')) || undefined
+  const own = (await $.env.get('GLAB_CONFIG_DIR')) || undefined
+  const config = (await $.env.get('XDG_CONFIG_HOME')) || (home ? `${home}/.config` : undefined)
+  const candidates = [
+    ...(own ? [`${own}/config.yml`] : []),
+    ...(home ? [`${home}/Library/Application Support/glab-cli/config.yml`] : []),
+    ...(config ? [`${config}/glab-cli/config.yml`] : []),
+  ]
+  for (const path of candidates) {
+    if (!(await $.fs.exists(path).catch(() => false))) continue
+    return glabHosts(String(await $.fs.read(path).catch(() => '')))
+  }
+  return []
+}
+
 async function discover($: EngineInterface): Promise<string | undefined> {
   const [gh, glab, acli] = await Promise.all(['gh', 'glab', 'acli'].map(name => hasCli($, name)))
+  const now = await $.clock.now()
+  const searches = lookupsAt(now)
   const jobs: Promise<Found[]>[] = []
   if (gh) {
-    jobs.push(lookup($, LOOKUPS.ghAuthored).then(out => parseGh(out, 'author')))
-    jobs.push(lookup($, LOOKUPS.ghReview).then(out => parseGh(out, 'reviewer')))
+    jobs.push(lookup($, searches.ghAuthored).then(out => parseGh(out, 'author')))
+    jobs.push(lookup($, searches.ghReview).then(out => parseGh(out, 'reviewer')))
   }
   if (glab) {
-    jobs.push(lookup($, LOOKUPS.glabAuthored).then(out => parseGlab(out, 'author')))
-    jobs.push(
-      lookup($, LOOKUPS.glabUser).then(async out => {
-        const argv = glabReviewLookup(usernameOf(out))
-        return argv ? parseGlab(await lookup($, argv), 'reviewer') : []
-      }),
-    )
+    const hosts = await glabConfigHosts($)
+    for (const host of hosts.length > 0 ? hosts : [undefined]) {
+      const on = glabLookups(host, now)
+      jobs.push(lookup($, on.authored).then(out => parseGlab(out, 'author')))
+      jobs.push(
+        lookup($, on.user).then(async out => {
+          const argv = glabReviewLookup(usernameOf(out), host, now)
+          return argv ? parseGlab(await lookup($, argv), 'reviewer') : []
+        }),
+      )
+    }
   }
-  if (acli) jobs.push(lookup($, LOOKUPS.jira).then(parseJira))
+  if (acli) jobs.push(lookup($, searches.jira).then(parseJira))
   const found = (await Promise.all(jobs)).flat()
   return foundSection(notOnBoard(found, await read($, board)), await recentClaudeSessions($))
 }

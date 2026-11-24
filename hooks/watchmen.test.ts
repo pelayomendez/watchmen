@@ -7,7 +7,7 @@ import { AWAY_MS, dismissedQuestion, isDismissed, noteDismissed, lanesOf, sinceY
 import { newestBackupOf, newestHandoff } from './register'
 import { briefing, pickModel, skillCandidates } from './briefing'
 import { checkOf, isInside, parseFrontMatter, parseInboxEntry, parseParkArgs, parkedItem, shellWord, stateDirOf } from './park'
-import { foundSection, glabReviewLookup, notOnBoard, parseGh, parseGlab, parseJira, projectDirName, recentSessions } from './discover'
+import { foundSection, glabHosts, glabReviewLookup, lookups, staleBefore, notOnBoard, parseGh, parseGlab, parseJira, projectDirName, recentSessions } from './discover'
 
 const MIN = 60_000
 
@@ -432,8 +432,20 @@ test('discovery parses what the lookups answer, cleans titles, and skips what is
     { kind: 'jira', id: 'ABC-1', title: 'Frames', role: 'assignee' },
   ])
   expect(parseJira(JSON.stringify({ issues: [{ key: 'ABC-2', summary: 'S' }] }))[0]?.id).toBe('ABC-2')
-  expect(glabReviewLookup('pelayo.m')).toEqual(['glab', 'api', 'merge_requests?state=opened&scope=all&reviewer_username=pelayo.m&per_page=10'])
-  expect(glabReviewLookup('x&scope=all')).toBeUndefined()
+  const day = Date.UTC(2026, 10, 24)
+  expect(staleBefore(day)).toBe('2026-09-25')
+  expect(glabReviewLookup('pelayo.m', 'git.example.com', day)).toEqual([
+    'glab', 'api', '--hostname', 'git.example.com', 'merge_requests?state=opened&scope=all&reviewer_username=pelayo.m&updated_after=2026-09-25T00:00:00Z&per_page=10',
+  ])
+  expect(glabReviewLookup('x&scope=all', undefined, day)).toBeUndefined()
+  expect(lookups(day).ghAuthored).toContain('>=2026-09-25')
+  expect(glabHosts(['git_protocol: ssh', 'hosts:', '    gitlab.com:', '        api_host: gitlab.com', '    git.example.com:', '        token: secret', '    "other.example.org":', '        token: ""', '    bad host:', '    fourth.example.net:', '    fifth.example.net:', 'aliases: {}'].join('\n'))).toEqual([
+    'git.example.com',
+    'other.example.org',
+    'fourth.example.net',
+  ])
+  expect(glabHosts(['hosts:', '  gitlab.com:', '    token: abc'].join('\n'))).toEqual(['gitlab.com'])
+  expect(glabHosts('editor: vim')).toEqual([])
   const board: Item[] = [{ id: 'ABC-1', title: 'Frames', lane: 'moving' }, { id: 'pr', title: 'PR', lane: 'waiting', link: 'https://github.com/o/r/pull/7' }]
   expect(notOnBoard([...gh, ...gh, ...glab, ...parseJira('[{"key":"ABC-1","summary":"F"}]')], board).map(one => one.id)).toEqual(['grp/proj!42'])
   expect(notOnBoard(Array.from({ length: 20 }, (_, at) => ({ kind: 'jira' as const, id: `A-${at}`, title: 't', role: 'assignee' as const })), [])).toHaveLength(15)
@@ -478,6 +490,33 @@ test('/watchmen start ends the briefing with what discovery found, never what is
   // Nothing found was put on the board, and no lookup ran a check.
   expect(seen.writes['.companion/board.json']).toBeUndefined()
   expect(seen.runs).toEqual([])
+})
+
+test('GitLab lookups go to each host in glab\'s config, by name; old PRs are left out', async ($, on) => {
+  mock.env(on, { HOME: '/home/u' })
+  const config = ['hosts:', '    gitlab.com:', '        api_host: gitlab.com', '    git.example.com:', '        token: secret-value'].join('\n')
+  const seen = engine(on, { 'prompts/persona.md': 'P', '/home/u/Library/Application Support/glab-cli/config.yml': config }, 10)
+  seen.install('glab', {
+    'glab api --hostname git.example.com user': JSON.stringify({ username: 'pm' }),
+    'glab api --hostname git.example.com merge_requests?state=opened&scope=created_by_me': JSON.stringify([
+      { iid: 3, title: 'Mine', web_url: 'https://git.example.com/g/p/-/merge_requests/3', references: { full: 'g/p!3' } },
+    ]),
+  })
+  seen.install('gh')
+  await $.session.start(START)
+  await seen.clock.settle()
+  await $.command.run(typed('start'))
+  await seen.clock.settle()
+  const lines = seen.lookups.map(argv => argv.join(' '))
+  expect(lines.filter(line => line.startsWith('glab'))).toEqual([
+    expect.stringContaining('glab api --hostname git.example.com merge_requests?state=opened&scope=created_by_me&updated_after='),
+    'glab api --hostname git.example.com user',
+    expect.stringContaining('glab api --hostname git.example.com merge_requests?state=opened&scope=all&reviewer_username=pm&updated_after='),
+  ])
+  expect(lines.filter(line => line.startsWith('gh')).every(line => /--updated >=[0-9]{4}-[0-9]{2}-[0-9]{2}/.test(line))).toBe(true)
+  expect(seen.prompts.join('\n')).toContain('- [gitlab-mr] g/p!3 "Mine" (yours)')
+  // The token is never in anything the plugin said or logged.
+  expect([...seen.prompts, ...seen.logs].join('\n')).not.toContain('secret-value')
 })
 
 test('launched, what discovery found goes in as a message of its own; nothing found, nothing sent', async ($, on) => {
