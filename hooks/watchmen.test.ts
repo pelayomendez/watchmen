@@ -550,6 +550,47 @@ test('launched, what discovery found goes in as a message of its own; nothing fo
   expect(seen.lookups[0]).toContain("assignee = currentUser() AND statusCategory = 'In Progress'")
 })
 
+test('/watchmen done moves an item to done, with an optional note, and only for the person', async ($, on) => {
+  mock.env(on, { WATCHMEN: '1' })
+  const board = [
+    { id: 'deck', title: 'Deck review', lane: 'needs-you' as const, note: 'waiting on you', isChanged: true },
+    { id: 'mr-7', title: 'MR 7', lane: 'moving' as const, note: 'in review' },
+  ]
+  const seen = engine(on, { '.companion/board.json': serialize(board) }, 10)
+  await $.session.start(START)
+  await seen.clock.settle()
+
+  // The model or another plugin cannot close an item; the board is left as it was.
+  const byPlugin = await $.command.run({ ...typed('done deck'), origin: { kind: 'plugin', name: 'other' } } as never)
+  expect(byPlugin.text).toBe('Only you can mark an item done: type /watchmen done yourself.')
+  expect(seen.writes['.companion/board.json']).toBeUndefined()
+
+  expect((await $.command.run(typed('done'))).text).toBe('Usage: /watchmen done <id> [note]')
+  expect((await $.command.run(typed('done nope'))).text).toBe('No item "nope" on the board.')
+
+  // Without a note the item keeps its own; it moves and its changed flag clears.
+  expect((await $.command.run(typed('done deck'))).text).toBe('Done: deck')
+  expect(savedBoard(seen)[0]).toEqual({ id: 'deck', title: 'Deck review', lane: 'done', note: 'waiting on you', isChanged: false })
+
+  // With a note it replaces the one there; typing in the desktop app (sdk) counts as the person.
+  const sdk = await $.command.run({ ...typed('done mr-7 merged and released'), origin: { kind: 'sdk' } } as never)
+  expect(sdk.text).toBe('Done: mr-7')
+  expect(savedBoard(seen)[1]).toEqual({ id: 'mr-7', title: 'MR 7', lane: 'done', note: 'merged and released', isChanged: false })
+
+  // A note with invisible characters is refused, so the board shows what was typed.
+  expect((await $.command.run(typed('done mr-7 ok\u202eevil'))).text).toContain('invisible formatting characters')
+  expect(savedBoard(seen)[1]?.note).toBe('merged and released')
+})
+
+test('/watchmen done is a command of the watch: elsewhere it says how to start', async ($, on) => {
+  mock.env(on, {})
+  const seen = engine(on, { '.companion/board.json': serialize([JIRA]) }, 10)
+  await $.session.start(START)
+  await seen.clock.settle()
+  expect((await $.command.run(typed('done ABC-1'))).text).toBe(`${NOT_WATCH} Type /watchmen start to make this session the watch.`)
+  expect(seen.writes['.companion/board.json']).toBeUndefined()
+})
+
 test('/watchmen approve all approves every waiting check, shows each command, and only for the person', async ($, on) => {
   mock.env(on, { WATCHMEN: '1' })
   const board = [
@@ -1229,6 +1270,12 @@ test('the briefing is the launcher\'s: persona, skill, task model, about-you, ha
   expect(pickModel('x"; rm', 'opus')).toBe('opus')
   expect(skillCandidates('/h', '')).toEqual(['/h/.claude/skills/ambient-companion/SKILL.md', '/h/.agents/skills/ambient-companion/SKILL.md'])
   expect(skillCandidates(undefined, '/s/SKILL.md')).toEqual(['/s/SKILL.md'])
+  // The copy the plugin ships comes last: a copy of your own wins.
+  expect(skillCandidates('/h', undefined, '/p/')).toEqual([
+    '/h/.claude/skills/ambient-companion/SKILL.md',
+    '/h/.agents/skills/ambient-companion/SKILL.md',
+    '/p/skills/ambient-companion/SKILL.md',
+  ])
 })
 
 test('a check never runs until the human approves its command, and the model cannot approve it', async ($, on) => {

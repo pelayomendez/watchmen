@@ -118,8 +118,8 @@ const COMMAND_IDLE = {
 }
 const COMMAND_WATCH = {
   name: 'watchmen',
-  description: 'The watch: open the board, or track <title> | brief | band | approve <id> <hash> | reload | reset',
-  argumentHint: '[track <title> | brief | band | approve <id> <hash> | approve all | reload | reset]',
+  description: 'The watch: open the board, or track <title> | done <id> [note] | brief | band | approve <id> <hash> | reload | reset',
+  argumentHint: '[track <title> | done <id> [note] | brief | band | approve <id> <hash> | approve all | reload | reset]',
 }
 // Who may turn a session into the watch: the person, typing (in a terminal, through the bridge, or
 // in a session an SDK host such as the desktop app runs), never the model or another plugin.
@@ -845,34 +845,17 @@ async function startWatch(
   return watch
 }
 
-/** The directories (or links to them) inside path, as paths; none when it is missing. */
-async function subdirs($: EngineInterface, path: string): Promise<string[]> {
-  if (!(await $.fs.exists(path))) return []
-  const entries = await $.fs.list(path).catch(() => [])
-  return entries.filter(one => one.kind === 'dir' || one.isLink).map(one => `${path}/${one.name}`)
-}
-
 /**
  * The ambient-companion skill, looked for where the launcher's find_skill looks: WATCHMEN_SKILL,
- * the two skill folders, then the newest copy in any pelayo-skills bucket of the plugin cache.
+ * the two skill folders, then the copy the plugin ships.
  */
 async function findSkill($: EngineInterface): Promise<string | undefined> {
   try {
     const home = (await $.env.get('HOME')) || undefined
-    for (const path of skillCandidates(home, (await $.env.get('WATCHMEN_SKILL')) || undefined)) {
+    for (const path of skillCandidates(home, (await $.env.get('WATCHMEN_SKILL')) || undefined, $.plugin.root)) {
       if (await $.fs.exists(path)) return path
     }
-    if (!home) return undefined
-    const found: { path: string; mtimeMs: number }[] = []
-    for (const market of await subdirs($, `${home}/.claude/plugins/cache`)) {
-      for (const version of await subdirs($, `${market}/pelayo-skills`)) {
-        for (const bucket of await subdirs($, `${version}/skills`)) {
-          const path = `${bucket}/ambient-companion/SKILL.md`
-          if (await $.fs.exists(path)) found.push({ path, mtimeMs: (await $.fs.stat(path)).mtimeMs })
-        }
-      }
-    }
-    return found.sort((a, b) => b.mtimeMs - a.mtimeMs)[0]?.path
+    return undefined
   } catch {
     return undefined
   }
@@ -1576,6 +1559,16 @@ export const register: Register = on => {
       const title = rest.join(' ')
       if (!title) return { text: 'Usage: /watchmen track <title>' }
       const answer = await change($, items => track(items, { title, kind: 'todo' }, 'needs-you'), () => `Tracked: ${title}`)
+      return { text: 'deny' in answer ? answer.deny : answer.result }
+    }
+    if (verb === 'done') {
+      // Closing an item is the person's call, as taking one is: only their typing moves it.
+      if (!STARTERS.includes(e.origin.kind)) return { text: 'Only you can mark an item done: type /watchmen done yourself.' }
+      const [id, ...words] = rest
+      if (!id) return { text: 'Usage: /watchmen done <id> [note]' }
+      const note = words.length > 0 ? words.join(' ') : undefined
+      if (note !== undefined && hasHidden(note)) return { text: 'The note holds control or invisible formatting characters. Write it in plain characters.' }
+      const answer = await change($, items => move(items, id, 'done', note), () => `Done: ${sanitize(id)}`)
       return { text: 'deny' in answer ? answer.deny : answer.result }
     }
     if (verb === 'approve') {

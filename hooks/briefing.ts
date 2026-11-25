@@ -14,12 +14,14 @@ export function pickModel(value: string | undefined, fallback: string): string {
 
 /**
  * Where the ambient-companion skill may be, in the launcher's order: WATCHMEN_SKILL, the two skill
- * folders, then the newest copy in the plugin cache (found apart, it needs a directory walk).
+ * folders (a copy of your own there wins), then the copy the plugin ships under its root.
  */
-export function skillCandidates(home: string | undefined, envSkill: string | undefined): string[] {
-  return [envSkill, ...(home ? [`${home}/.claude/skills/ambient-companion/SKILL.md`, `${home}/.agents/skills/ambient-companion/SKILL.md`] : [])].filter(
-    (path): path is string => !!path,
-  )
+export function skillCandidates(home: string | undefined, envSkill: string | undefined, pluginRoot?: string): string[] {
+  return [
+    envSkill,
+    ...(home ? [`${home}/.claude/skills/ambient-companion/SKILL.md`, `${home}/.agents/skills/ambient-companion/SKILL.md`] : []),
+    ...(pluginRoot ? [`${pluginRoot.replace(/\/+$/, '')}/skills/ambient-companion/SKILL.md`] : []),
+  ].filter((path): path is string => !!path)
 }
 
 export function skillLine(skill: string | undefined): string {

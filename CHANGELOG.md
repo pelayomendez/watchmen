@@ -2,9 +2,9 @@
 
 Releases are tagged `watchmen--v<version>` (Claude Code) and `v<version>` (herdr `--ref`).
 
-## Unreleased
+## 0.4.0
 
-Proposed as 0.4.0: hand sessions to the watch and take work back from it.
+Hand sessions to the watch, take work back from it, and close what is finished. 0.3.0 was never tagged, so this release also carries everything under 0.3.0 below.
 
 Park and take
 
@@ -12,6 +12,14 @@ Park and take
 - A parked git worktree (`repo-TICKET` beside `repo`) is covered by a watch over its repository. Under nested watches the deepest takes it.
 - Parking from a folder no watch covers goes to the only running watch and says so; with several running, `/watchmen park` lists them and asks for `--to <workspace>`; with none, it suggests where to start one, and the park shows as a dim line in every watch until one covers it.
 - `/watchmen take [id]` is the opposite of park: alone it lists the open items of the watch that covers the folder; with an id it sends that item, quoted, as your first message, naming a parked item's handoff to read first; for a parked item that can still be resumed it sends nothing and prints the resume line instead. The watch moves the item to moving with where it is worked on; the taking session never writes the board.
+
+Done
+
+- `/watchmen done <id> [note]`, in the watch, moves an item to done and sets its note when you give one. Like `take`, it counts only when you type it; the model and other plugins are refused, and a note with hidden characters is refused.
+
+The skill
+
+- The `ambient-companion` skill, the watch's process, ships inside the plugin, since yatsude 0.22.0 no longer carries it. A copy of your own in `WATCHMEN_SKILL`, `~/.claude/skills/` or `~/.agents/skills/` still wins; the plugin cache is no longer searched for a `pelayo-skills` copy, and herdr's install no longer warns about the skill.
 
 The watch
 
@@ -31,7 +39,7 @@ Upgrading
 
 ## 0.3.0
 
-watchmen as your assistant, on the desktop too.
+Never tagged: released as part of 0.4.0. watchmen as your assistant, on the desktop too.
 
 - `/watchmen start` makes any session the watch, the Claude desktop app's included: it loads the board and sends the launcher's briefing as the first message. The session keeps the model picked there. It cannot be started by the model or another plugin.
 - Check approvals (`/watchmen approve`) are still typed in a terminal session or through Remote Control; typing them in the desktop app may not count until that is confirmed.

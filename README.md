@@ -39,7 +39,7 @@ It is safe to install globally: in every session but the watch it only offers `/
 Requirements:
 
 - [Claude Code](https://code.claude.com) 2.1.287 or newer (plugin hooks modules), Node.js 20 or newer, and bash.
-- The `ambient-companion` skill, the watch's process. The plugin looks for it in `WATCHMEN_SKILL`, `~/.claude/skills/ambient-companion/`, `~/.agents/skills/ambient-companion/`, then any `pelayo-skills` bucket in the plugin cache. Without it the watch says so and works from its persona and the last handoff.
+- The `ambient-companion` skill, the watch's process, ships with the plugin. A copy of your own wins: the plugin looks in `WATCHMEN_SKILL`, `~/.claude/skills/ambient-companion/` and `~/.agents/skills/ambient-companion/` first, then uses its own.
 - Optional: the CLIs your checks call (`gh`, `glab`, `acli`…). They are also what discovery uses.
 - Optional: [herdr](https://herdr.dev) 0.9 or newer (0.9.5 recommended), on macOS or Linux, for summon, follow mode and the sidebar token.
 
@@ -81,12 +81,13 @@ Tell the watch anything else in plain words: "keep an eye on MR 42", "remind me 
 | `/watchmen` | the watch | Opens the board pane and prints the board, the handoff, the skill and the context fill. |
 | `/watchmen brief` | the watch | Prints the board grouped by lane. |
 | `/watchmen track <title>` | the watch | Adds a todo to needs-you. |
+| `/watchmen done <id> [note]` | the watch | Moves that item to done, and sets its note when you give one. |
 | `/watchmen approve <id> <hash>` | the watch | Lets that item's exact check run, in this workspace. |
 | `/watchmen approve all [<hash>]` | the watch | Lists every waiting check with one hash over the set; with the hash, approves exactly that set. |
 | `/watchmen band` | the watch | Hides or shows the band. |
 | `/watchmen reload`, `/watchmen reset` | the watch | Recovers from an unreadable `board.json`: read it again, or write it from the board in memory. |
 
-`start`, `park`, `take` and `approve` count only when you type them; the model and other plugins are refused.
+`start`, `park`, `take`, `done` and `approve` count only when you type them; the model and other plugins are refused.
 
 ## Safety
 

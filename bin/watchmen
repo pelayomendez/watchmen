@@ -22,17 +22,15 @@ if [ "${1:-}" = "board" ]; then
   exec node "$ROOT/bin/watchmen-board" "$@"
 fi
 
-# The ambient-companion skill is the watch's process. Look where its install routes put it;
-# WATCHMEN_SKILL points anywhere else.
+# The ambient-companion skill is the watch's process. A copy of your own in a skill folder wins,
+# then the one the plugin ships; WATCHMEN_SKILL points anywhere else.
 find_skill() {
   local candidates=(
     "${WATCHMEN_SKILL:-}"
     "$HOME/.claude/skills/ambient-companion/SKILL.md"
     "$HOME/.agents/skills/ambient-companion/SKILL.md"
+    "$ROOT/skills/ambient-companion/SKILL.md"
   )
-  local found
-  found=$(ls -td "$HOME"/.claude/plugins/cache/*/pelayo-skills/*/skills/*/ambient-companion/SKILL.md 2>/dev/null | head -1 || true)
-  [ -n "$found" ] && candidates+=("$found")
   for path in "${candidates[@]}"; do
     [ -n "$path" ] && [ -f "$path" ] && { echo "$path"; return; }
   done
@@ -40,8 +38,7 @@ find_skill() {
 
 skill=$(find_skill || true)
 if [ -z "$skill" ]; then
-  echo "watchmen: ambient-companion skill not found; install it with:" >&2
-  echo "  npx skills@latest add pelayomendez/pelayo-skills" >&2
+  echo "watchmen: ambient-companion skill not found; the plugin ships it in $ROOT/skills/ambient-companion/" >&2
 fi
 
 handoff=$(ls .companion/handoff-*.md 2>/dev/null | sort | tail -1 || true)
