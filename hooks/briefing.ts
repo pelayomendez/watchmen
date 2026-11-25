@@ -32,8 +32,9 @@ export function taskLine(taskModel: string): string {
   return `Keep this session for the watch. When the human asks you to perform a task (write or fix something, research, review, draft, analyse), do not do it in this session: hand it to a subagent with the Agent tool and model "${taskModel}", with a complete brief, then report its result in a few sentences. Board work, triage, checks and quick answers stay with you.`
 }
 
-export function aboutYouLine(): string {
-  return `What you know of the human's standing preferences is in ${ABOUT_YOU}: read it now if it exists, and keep it as the persona says.`
+export function aboutYouLine(workspace?: string): string {
+  const path = workspace ? `${workspace.replace(/\/+$/, '')}/${ABOUT_YOU}` : ABOUT_YOU
+  return `What you know of the human's standing preferences is in ${path}: read it now if it exists, and keep it as the persona says.`
 }
 
 export function handoffLine(handoff: string | undefined): string {
@@ -53,7 +54,7 @@ export function briefing(input: { persona: string; skill?: string; handoff?: str
     skillLine(input.skill),
     taskLine(input.taskModel),
     ...(input.workspace ? [workspaceLine(input.workspace)] : []),
-    aboutYouLine(),
+    aboutYouLine(input.workspace),
     handoffLine(input.handoff),
   ].join('\n\n')
 }

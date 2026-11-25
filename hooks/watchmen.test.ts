@@ -144,8 +144,10 @@ test('board.json: a check with a bad interval falls back to the default, and a c
 
 // The engine hands an fs hook the path resolved against the working directory. The plugin's own
 // persona is served as prompts/persona.md, wherever the plugin sits.
+// The workspace in these tests is /w: its .companion files are keyed relative, any other folder's
+// by their absolute path, so a read or write in the wrong folder misses.
 const relative = (path: string) =>
-  path.includes('.companion') ? path.slice(path.indexOf('.companion')) : path.endsWith('/prompts/persona.md') ? 'prompts/persona.md' : path
+  path.startsWith('/w/.companion') ? path.slice('/w/'.length) : path.endsWith('/prompts/persona.md') ? 'prompts/persona.md' : path
 
 const PROCESS_OK = { exitCode: 0, stderr: '', isStdoutTruncated: false, isStderrTruncated: false }
 
@@ -1921,8 +1923,10 @@ test("a taken item's text stays data: quoted and escaped, and hidden characters 
   expect(seen.prompts).toHaveLength(1)
 })
 
+const PARKED_ENTRY = ENTRY({ sessionId: '0123456789ab-cd', cwd: '/dev/my repo', handoff: `${STATE}/parked/2026-11-20-0123456789ab.md` })
+
 test('taking a parked session prints the line that resumes it and sends nothing', async ($, on) => {
-  const { seen, take, records } = await takeSession($, on)
+  const { seen, take, records } = await takeSession($, on, { [`${STATE}/inbox/done/0123456789ab.json`]: PARKED_ENTRY })
   const answer = await take('park-0123456789ab')
   expect(answer).toBe("park-0123456789ab is a parked session: resume it where it was, with\n  cd '/dev/my repo' && claude --resume 0123456789ab-cd The watch moves it to moving.")
   expect(seen.prompts).toEqual([])
@@ -1940,7 +1944,10 @@ test('a parked item whose note lost its resume line goes in with its handoff to 
 })
 
 test('take: only the person, and it says when no watch or several watches could answer', async ($, on) => {
-  const { seen, take } = await takeSession($, on, { [`${STATE}/heartbeat/w.json`]: JSON.stringify({ cwd: '/w', at: -5 * MIN }) })
+  const { seen, take } = await takeSession($, on, {
+    [`${STATE}/heartbeat/w.json`]: JSON.stringify({ cwd: '/w', at: -5 * MIN }),
+    '/a/.companion/board.json': serialize(TAKE_BOARD),
+  })
   expect((await $.command.run({ ...typed('take ABC-1'), origin: { kind: 'plugin', name: 'x' } } as never)).text).toContain('Only you can take')
   expect(await take('ABC-1')).toBe('No watch is running for /w. Start one with /watchmen start in the folder that holds the work.')
   seen.addFile(`${STATE}/heartbeat/a.json`, JSON.stringify({ cwd: '/a', at: 0 }))
@@ -2036,4 +2043,75 @@ test('a park sent to a watch with --to is taken by that watch, and waits when th
   // Sent to a watch that is not running, it waits for that one, though this watch covers its folder.
   expect(seen.files[`${STATE}/inbox/lost.json`]).toBeDefined()
   expect(JSON.stringify(await (await mountBand($, 200)).drawn())).toContain('1 parked session waits for a watch in /gone')
+})
+
+test('a resume line is printed only for a park this machine took in, from its own entry', async ($, on) => {
+  // The board says /dev/my repo; with no park entry behind it, no line is printed and the item
+  // goes in as a prompt.
+  const { seen, take } = await takeSession($, on)
+  expect(await take('park-0123456789ab')).toBe('Taking park-0123456789ab from the watch in /w. The watch moves it to moving.')
+  expect(seen.prompts).toHaveLength(1)
+})
+
+test('the folder a resume line prints is the park entry\'s, whatever the board\'s note says', async ($, on) => {
+  const { take } = await takeSession($, on, { [`${STATE}/inbox/done/0123456789ab.json`]: ENTRY({ sessionId: '0123456789ab-cd', cwd: '/dev/real' }) })
+  expect(await take('park-0123456789ab')).toContain('  cd /dev/real && claude --resume 0123456789ab-cd')
+})
+
+test('take reads the board of the watch it found, wherever that is, and refuses a --to no watch runs in', async ($, on) => {
+  const { seen, take, records } = await takeSession($, on, {
+    [`${STATE}/heartbeat/a.json`]: JSON.stringify({ cwd: '/a', at: 0 }),
+    '/a/.companion/board.json': serialize([{ id: 'A-1', title: 'Only in /a', lane: 'moving' }]),
+  })
+  expect(await take('--to /a')).toContain('Only in /a')
+  expect(await take('--to /a')).not.toContain('Frames import')
+  expect(await take('A-1 --to /a')).toBe('Taking A-1 from the watch in /a. The watch moves it to moving.')
+  expect(records()[0]).toMatchObject({ workspace: '/a', id: 'A-1' })
+  expect(await take('--to /nowhere')).toBe('No watch is running in /nowhere. Type /watchmen take without --to to see the one that covers this folder.')
+  expect(seen.prompts).toHaveLength(1)
+})
+
+test('after a cd, reload still reads the workspace\'s board', async ($, on) => {
+  mock.env(on, { WATCHMEN: '1', HOME: '/home/u' })
+  const seen = engine(on, { '.companion/board.json': serialize([JIRA]), '/w/sub/.companion/board.json': serialize([]) }, 10)
+  await $.session.start(START)
+  await seen.clock.settle()
+  seen.setCwd('/w/sub')
+  expect((await $.command.run(typed('reload'))).text).toBe('Board reloaded.')
+  expect((await $.command.run(typed('brief'))).text).toContain('Frames')
+})
+
+test('a take record is applied once, even when it cannot be moved to done, and never to a done item', async ($, on) => {
+  mock.env(on, { WATCHMEN: '1', HOME: '/home/u' })
+  const seen = engine(
+    on,
+    {
+      '.companion/board.json': serialize(TAKE_BOARD),
+      [`${STATE}/inbox/take/mine.json`]: TAKE_RECORD(),
+      [`${STATE}/inbox/take/late.json`]: TAKE_RECORD({ id: 'gone' }),
+    },
+    10,
+  )
+  seen.failMv(/\/inbox\/take\/mine\.json$/)
+  await $.session.start(START)
+  await seen.clock.settle()
+  expect(savedBoard(seen).find(one => one.id === 'ABC-1')?.lane).toBe('moving')
+  expect(savedBoard(seen).find(one => one.id === 'gone')).toEqual({ id: 'gone', title: 'Shipped', lane: 'done' })
+  // The watch moves it on; the stuck record does not pull it back.
+  await $.tool.call({ tool: 'mcp__watchmen__board_move', id: 'ABC-1', lane: 'done', note: 'merged' })
+  await seen.clock.advance(MIN)
+  expect(savedBoard(seen).find(one => one.id === 'ABC-1')).toMatchObject({ lane: 'done', note: 'merged' })
+})
+
+test('parked under nested watches, the entry is pinned to the deepest, so only one takes it', async ($, on) => {
+  on('turn.complete', () => ({ text: '' }))
+  const { seen, path, turn } = await parkSession($, on, '', {
+    [`${STATE}/heartbeat/root.json`]: JSON.stringify({ cwd: '/', at: 0 }),
+    [`${STATE}/heartbeat/w.json`]: JSON.stringify({ cwd: '/w', at: 0 }),
+  })
+  seen.addFile(path, HANDOFF)
+  await turn()
+  await seen.clock.settle()
+  expect(JSON.parse(seen.writes[`${STATE}/inbox/abc123456789.json`] ?? '{}').to).toBe('/w')
+  expect(seen.logs.at(-1)).toBe('Parked in watchmen. You can close this session.')
 })

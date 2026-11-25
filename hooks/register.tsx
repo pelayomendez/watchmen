@@ -82,6 +82,7 @@ import {
   parseFrontMatter,
   parseInboxEntry,
   parseParkArgs,
+  resumeCommand,
   shortId,
   stateDirOf,
 } from './park'
@@ -633,7 +634,7 @@ async function maybeRotate($: EngineInterface, now: number, tokens: number | und
     wake: { pending: [], lastWakeAt: now },
   }))
   try {
-    await $.prompt.submit({ text: resumePrompt(handoff) })
+    await $.prompt.submit({ text: resumePrompt(handoff, await workspaceOf($)) })
   } catch (error) {
     $.ui.log(`watchmen: the conversation was cleared but the resume prompt failed: ${String(error)}. Tell the watch to read ${handoff}.`)
     await patchWatch($, held => ({ ...held, rotation: undefined }))
@@ -917,7 +918,9 @@ async function startPark($: EngineInterface, args: string): Promise<string> {
   const cwd = await $.session.cwd()
   const found = await watchFor($, dir, now, { cwd, ...optional('repoRoot', await repoRootAt($, cwd)) }, asked)
   if ('several' in found) return severalWatches('park', found.several, cwd, home)
-  const to = found.workspace !== undefined && found.how !== 'covers' ? found.workspace : undefined
+  // Pinned to one watch when it was not found by coverage, or when nested watches both cover it
+  // (else both would take the entry).
+  const to = found.workspace !== undefined && (found.how !== 'covers' || found.isNested) ? found.workspace : undefined
   const path = `${dir}/parked/${localDay(now).day}-${shortId(sessionId)}.md`
   const before = (await $.fs.exists(path)) ? String(await $.fs.read(path).catch(() => '')) : undefined
   const park: Park = {
@@ -954,11 +957,12 @@ async function watchFor(
   now: number,
   place: { cwd: string; repoRoot?: string },
   to: string | undefined,
-): Promise<{ workspace: string; how: 'to' | 'covers' | 'only'; isLive: boolean } | { several: string[] } | { workspace?: undefined }> {
+): Promise<{ workspace: string; how: 'to' | 'covers' | 'only'; isLive: boolean; isNested?: boolean } | { several: string[] } | { workspace?: undefined }> {
   const live = [...new Set(await liveWorkspaces($, dir, now))]
   if (to !== undefined) return { workspace: to, how: 'to', isLive: live.includes(to) }
   const covering = coveringOf(live, place)
-  if (covering !== undefined) return { workspace: covering, how: 'covers', isLive: true }
+  // Nested watches both cover a folder deep in both: the deepest is the one meant.
+  if (covering !== undefined) return { workspace: covering, how: 'covers', isLive: true, isNested: live.filter(one => covers(one, place)).length > 1 }
   if (live.length === 1) return { workspace: live[0]!, how: 'only', isLive: true }
   if (live.length > 1) return { several: live.sort() }
   return {}
@@ -1060,9 +1064,12 @@ async function completePark($: EngineInterface) {
   const unread = isRead ? '' : ` (its front matter could not be read: ${front.error}; parked with what it had)`
   // The same rule the watch takes entries by: the watch it was sent to, else a live watch whose
   // workspace holds cwd or repoRoot.
-  const watched = (await liveWorkspaces($, dir, now)).some(workspace => covers(workspace, entry))
+  const live = await liveWorkspaces($, dir, now)
+  const watched = live.some(workspace => covers(workspace, entry))
+  // Pinned to the deepest of nested watches, it is still a watch over its own folder.
+  const isOwnFolder = entry.to !== undefined && covers(entry.to, { cwd: entry.cwd, ...optional('repoRoot', entry.repoRoot) })
   const home = (await $.env.get('HOME')) || undefined
-  const where = entry.to
+  const where = entry.to && !(watched && isOwnFolder)
     ? watched
       ? `Parked in the watch in ${shortPath(entry.to, home)} (no watch covers ${shortPath(entry.cwd, home)}). You can close this session.`
       : `Parked for the watch in ${shortPath(entry.to, home)}, which is not running now: it will pick this up when it starts. You can close this session.`
@@ -1164,15 +1171,33 @@ async function takeTakes($: EngineInterface, workspace: string) {
       continue
     }
     if (record.workspace !== workspace) continue
-    // Applying a record twice gives the same lane and note, so a failed move only repeats it.
-    const item = (await read($, board)).find(one => one.id === record.id)
-    if (item) {
-      const { lane, note } = takenMove(record, item)
-      const answer = await change($, items => move(items, record.id, lane, note), () => 'taken')
-      if ('deny' in answer) continue
+    // A record applied before whose move failed is only moved again: applying it again would undo
+    // what the watch did with the item since. A done item stays done.
+    const key = `${record.sessionId}:${record.id}:${record.at}`
+    if (!(await $.state.get(WATCH)).value?.appliedTakes?.includes(key)) {
+      const item = (await read($, board)).find(one => one.id === record.id)
+      if (item && item.lane !== 'done') {
+        const { lane, note } = takenMove(record, item)
+        const answer = await change($, items => move(items, record.id, lane, note), () => 'taken')
+        if ('deny' in answer) continue
+      }
+      await patchWatch($, watch => ({ ...watch, appliedTakes: [...(watch.appliedTakes ?? []).filter(one => one !== key), key].slice(-100) }))
     }
     await moveTo($, path, `${inbox}/done`, name)
   }
+}
+
+/**
+ * The resume line of a parked item: only when its note still carries one (the watch keeps it there
+ * while the session waits) and the park's own inbox entry, in inbox/done, names that session; the
+ * folder and session id come from the entry, never from the board.
+ */
+async function parkedResume($: EngineInterface, dir: string, item: Item): Promise<{ cwd: string; sessionId: string; line: string } | undefined> {
+  if (!resumeOf(item)) return undefined
+  const short = item.id.slice('park-'.length)
+  const entry = parseInboxEntry(String(await $.fs.read(`${dir}/inbox/done/${short}.json`).catch(() => '')), `${dir}/parked`)
+  if (!entry || shortId(entry.sessionId) !== short) return undefined
+  return { cwd: entry.cwd, sessionId: entry.sessionId, line: resumeCommand(entry) }
 }
 
 /** Writes a take record into the take inbox, beside its name first and moved into place. */
@@ -1204,27 +1229,28 @@ async function startTake($: EngineInterface, args: string): Promise<string> {
   const found = await watchFor($, dir, now, { cwd, ...optional('repoRoot', await repoRootAt($, cwd)) }, to)
   if ('several' in found) return severalWatches('take', found.several, cwd, home)
   if (found.workspace === undefined) return `No watch is running for ${shortPath(cwd, home)}. Start one with /watchmen start in the folder that holds the work.`
+  // A take record for a watch that is not running would wait with nobody to apply it.
+  if (!found.isLive) return `No watch is running in ${shortPath(found.workspace, home)}. Type /watchmen take without --to to see the one that covers this folder.`
   const workspace = found.workspace
   const file = boardFileOf(workspace)
   if (!(await $.fs.exists(file).catch(() => false))) return `The watch in ${shortPath(workspace, home)} has no board yet.`
   const parsed = parseBoard(String(await $.fs.read(file).catch(() => '')))
   if ('error' in parsed) return `The board of the watch in ${shortPath(workspace, home)} could not be read: ${parsed.error}`
-  const notRunning = found.isLive ? '' : `\n(No watch is running in ${shortPath(workspace, home)} now.)`
-  if (!id) return takeList(parsed.items, workspace, home) + notRunning
+  if (!id) return takeList(parsed.items, workspace, home)
   const item = openItems(parsed.items).find(one => one.id === id)
   if (!item) return `No open item "${sanitize(id)}" on the board of the watch in ${shortPath(workspace, home)}. Type /watchmen take to list them.`
   if (!isTakeable(item)) return `Not taken: ${sanitize(id)} holds hidden characters in its title, kind or note.`
   const sessionId = await $.session.id()
   // A parked session is resumed where it was, not redone here: its own session is the one taken.
-  const resume = resumeOf(item)
+  // The line is shown only for a park this machine took in, from its own inbox entry, so a board
+  // item cannot get a crafted folder printed as a command to paste.
+  const resume = await parkedResume($, dir, item)
   const record: TakeRecord = resume
     ? { sessionId: resume.sessionId, cwd: resume.cwd, workspace, id: item.id, at: now }
     : { sessionId, cwd, workspace, id: item.id, at: now }
   const isMarked = await dropTakeRecord($, dir, record)
   const marked = isMarked
-    ? found.isLive
-      ? ' The watch moves it to moving.'
-      : ' The watch moves it to moving when it starts.'
+    ? ' The watch moves it to moving.'
     : ' The take record could not be written, so the board does not show it yet.'
   if (resume) return `${sanitize(item.id)} is a parked session: resume it where it was, with\n  ${resume.line}${marked}`
   const parked = `${dir}/parked`
@@ -1347,8 +1373,9 @@ export const register: Register = on => {
     if (!(await isWatch($))) return { deny: NOT_WATCH }
     const report = changeReport(await read($, board))
     // Once a kind has been dismissed often enough, the report asks the watch to ask, once.
+    const aboutYou = `${companionOf(await workspaceOf($))}/about-you.md`
     const line = await changeIgnored($, state => {
-      const asked = dismissedQuestion(state)
+      const asked = dismissedQuestion(state, aboutYou)
       return asked.line ? { state: asked.state, value: asked.line } : { value: undefined }
     })
     const watch = (await $.state.get(WATCH)).value

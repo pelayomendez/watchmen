@@ -32,6 +32,8 @@ export type Watch = {
   briefFailedAt?: number
   /** Park inbox entries already applied, as `<sessionId>:<at>`, so one is never applied twice. */
   appliedParks?: string[]
+  /** Take records already applied, as `<sessionId>:<id>:<at>`, so one never overrides a later move. */
+  appliedTakes?: string[]
   /** Parked sessions no live watch covers: the dim line in the band and the pane. */
   orphanNote?: string
   /** The orphan line board_changes last reported, so it is mentioned once. */

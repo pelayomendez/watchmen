@@ -207,8 +207,11 @@ export function rotatePrompt(companion: string): string {
 }
 
 /** The prompt that starts the watch again on a cleared conversation, from the handoff it wrote. */
-export function resumePrompt(handoff: string): string {
-  return `◆ resumed — the conversation was cleared to keep the watch light. Read ${handoff}, then call board_changes and triage. Speak only if something needs the human.`
+export function resumePrompt(handoff: string, workspace?: string): string {
+  const where = workspace
+    ? ` Your workspace is ${workspace}: every .companion/ path means ${workspace}/.companion/, wherever your shell's working directory goes.`
+    : ''
+  return `◆ resumed — the conversation was cleared to keep the watch light.${where} Read ${handoff}, then call board_changes and triage. Speak only if something needs the human.`
 }
 
 /**
@@ -562,12 +565,12 @@ export function noteDismissed(state: Ignored, kind: string): Ignored {
  * The one line board_changes adds when a kind has been dismissed IGNORE_AFTER times and the watch
  * has not asked about it yet, and the state with that kind marked asked.
  */
-export function dismissedQuestion(state: Ignored): { line?: string; state: Ignored } {
+export function dismissedQuestion(state: Ignored, aboutYou = '.companion/about-you.md'): { line?: string; state: Ignored } {
   const kind = Object.keys(state.counts).find(one => state.counts[one]! >= IGNORE_AFTER && !state.asked.includes(one))
   if (kind === undefined) return { state }
   const shown = sanitize(kind).slice(0, 40)
   return {
-    line: `The human dismissed ${state.counts[kind]} '${shown}' items without acting on them. Ask them once, in one sentence, whether to stop raising '${shown}' items; if they agree, add a line saying so to .companion/about-you.md.`,
+    line: `The human dismissed ${state.counts[kind]} '${shown}' items without acting on them. Ask them once, in one sentence, whether to stop raising '${shown}' items; if they agree, add a line saying so to ${aboutYou}.`,
     state: { ...state, asked: [...state.asked, kind] },
   }
 }
