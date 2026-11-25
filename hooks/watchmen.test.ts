@@ -842,7 +842,7 @@ const STATE = '/home/u/.local/state/watchmen'
 const HANDOFF = `---
 title: Frames import, slice 3
 lane: waiting
-waiting_on: Florian's review on !42
+waiting_on: Sam's review on !42
 link: https://gitlab.example.com/g/p/-/merge_requests/42
 check: ["glab","mr","view","42","-R","g/p","-F","json"]
 ---
@@ -864,7 +864,7 @@ async function parkSession($: Engine, on: On, args: string, files: Record<string
 
 test('/watchmen park asks the session for its handoff, then puts it in the inbox for the watch', async ($, on) => {
   on('turn.complete', () => ({ text: '' }))
-  const { seen, path, turn } = await parkSession($, on, 'waiting ask Florian on Monday')
+  const { seen, path, turn } = await parkSession($, on, 'waiting ask Sam on Monday')
   expect(path).toMatch(new RegExp(`^${STATE}/parked/[0-9]{4}-[0-9]{2}-[0-9]{2}-abc123456789\\.md$`))
   expect(seen.prompts).toHaveLength(1)
   expect(seen.asUser).toEqual(seen.prompts)
@@ -886,10 +886,10 @@ test('/watchmen park asks the session for its handoff, then puts it in the inbox
     handoff: path,
     title: 'Frames import, slice 3',
     lane: 'waiting',
-    waitingOn: "Florian's review on !42",
+    waitingOn: "Sam's review on !42",
     link: 'https://gitlab.example.com/g/p/-/merge_requests/42',
     check: ['glab', 'mr', 'view', '42', '-R', 'g/p', '-F', 'json'],
-    note: 'ask Florian on Monday',
+    note: 'ask Sam on Monday',
   })
   // No watch beats here, so it waits for one.
   expect(seen.logs.at(-1)).toContain('Parked. No watch covers /w yet: start one in a parent folder (for example /) with /watchmen start; it will pick this up. You can close this session.')
@@ -1038,7 +1038,7 @@ const ENTRY = (over: Record<string, unknown> = {}) =>
     at: 1,
     title: 'Frames import',
     lane: 'waiting',
-    waitingOn: 'Florian',
+    waitingOn: 'Sam',
     check: ['glab', 'mr', 'view', '42'],
     ...over,
   })
@@ -1063,7 +1063,7 @@ test('the watch takes parked sessions for its workspace onto the board, checks a
     kind: 'session',
     lane: 'waiting',
     title: 'Frames import',
-    note: 'waiting on Florian · resume: cd /w/api && claude --resume abc12345-6789-session',
+    note: 'waiting on Sam · resume: cd /w/api && claude --resume abc12345-6789-session',
     link: `${STATE}/parked/2026-11-24-abc123456789.md`,
     check: { argv: ['glab', 'mr', 'view', '42'] },
     isAwaitingApproval: true,
@@ -1077,7 +1077,7 @@ test('the watch takes parked sessions for its workspace onto the board, checks a
   expect(seen.files[`${STATE}/inbox/other.json`]).toBeDefined()
   // The watch is woken, and board_changes says where it came from, quoted.
   expect(seen.prompts).toContain('◆ 1 item changed — call board_changes')
-  expect((await $.tool.call({ tool: 'mcp__watchmen__board_changes' })).result).toContain('now: parked from "/w/api": "Frames import", waiting on "Florian"')
+  expect((await $.tool.call({ tool: 'mcp__watchmen__board_changes' })).result).toContain('now: parked from "/w/api": "Frames import", waiting on "Sam"')
   // The watch beats for parked sessions to find.
   const heartbeat = Object.keys(seen.writes).find(key => key.startsWith(`${STATE}/heartbeat/`)) ?? ''
   expect(JSON.parse(seen.writes[heartbeat] ?? '{}')).toMatchObject({ cwd: '/w' })
