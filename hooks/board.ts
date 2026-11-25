@@ -198,18 +198,38 @@ export function isRotationDue(input: {
   return now - lastTurnAt >= ROTATE_IDLE_MS && tokens - baseTokens >= ROTATE_GROWTH_TOKENS
 }
 
-/** The prompt that asks the watch for its handoff before a rotation. Constant: no board text. */
-export const ROTATE_PROMPT =
-  '◆ rotate — the watch has been idle and its conversation is long. Write the handoff now, as your skill describes, to .companion/handoff-<YYYY-MM-DD-HHMM>.md. Do not triage or speak to the human; end the turn once the file is written.'
-
-/** The prompt that starts the watch again on a cleared conversation, from the handoff it wrote. */
-export function resumePrompt(handoff: string): string {
-  return `◆ resumed — the conversation was cleared to keep the watch light. Read ${handoff}, then call board_changes and triage. Speak only if something needs the human.`
+/**
+ * The prompt that asks the watch for its handoff before a rotation, into the workspace's
+ * .companion folder (absolute: the shell may have moved). No board text.
+ */
+export function rotatePrompt(companion: string): string {
+  return `◆ rotate — the watch has been idle and its conversation is long. Write the handoff now, as your skill describes, to ${companion}/handoff-<YYYY-MM-DD>.md (update it in place if that file already exists). Do not triage or speak to the human; end the turn once the file is written.`
 }
 
-/** Removes control characters and DEL, so text from a board.json cannot drive the terminal. */
+/** The prompt that starts the watch again on a cleared conversation, from the handoff it wrote. */
+export function resumePrompt(handoff: string, workspace?: string): string {
+  const where = workspace
+    ? ` Your workspace is ${workspace}: every .companion/ path means ${workspace}/.companion/, wherever your shell's working directory goes.`
+    : ''
+  return `◆ resumed — the conversation was cleared to keep the watch light.${where} Read ${handoff}, then call board_changes and triage. Speak only if something needs the human.`
+}
+
+/**
+ * Characters that can make shown text differ from what it is: controls, format characters (bidi
+ * overrides, zero-width joiners), unassigned and private-use code points, line and paragraph
+ * separators.
+ */
+export const HIDDEN = /[\p{C}\u2028\u2029]/u
+const HIDDEN_ALL = /[\p{C}\u2028\u2029]/gu
+
+/** Whether text holds any character that could hide or reorder what is shown (HIDDEN). */
+export function hasHidden(text: string): boolean {
+  return HIDDEN.test(text)
+}
+
+/** Whitespace controls become spaces and every other hidden character goes, so shown text is plain. */
 export function sanitize(text: string): string {
-  return text.replace(/[\t\n\r\v\f]/g, ' ').replace(/[\u0000-\u001f\u007f-\u009f]/g, '')
+  return text.replace(/[\t\n\r\v\f\u2028\u2029]/g, ' ').replace(HIDDEN_ALL, '')
 }
 
 /**
@@ -275,11 +295,14 @@ function isItem(one: unknown): one is Item {
   return typeof item.id === 'string' && typeof item.title === 'string' && isLane(item.lane)
 }
 
-/** A check as read from a file: argv must be strings, and an everyMs that is not a number is dropped. */
+/**
+ * A check as read from a file: argv must be strings with no hidden characters (the approval line
+ * must show exactly what runs), and an everyMs that is not a number is dropped.
+ */
 function checkOf(value: unknown): Check | undefined {
   if (typeof value !== 'object' || value === null) return undefined
   const { argv, everyMs } = value as Record<string, unknown>
-  if (!Array.isArray(argv) || argv.length === 0 || !argv.every(one => typeof one === 'string')) return undefined
+  if (!Array.isArray(argv) || argv.length === 0 || !argv.every(one => typeof one === 'string' && !hasHidden(one))) return undefined
   return { argv, ...(typeof everyMs === 'number' && Number.isFinite(everyMs) ? { everyMs } : {}) }
 }
 
@@ -361,6 +384,9 @@ export function enteredNeedsYou(before: readonly Item[], after: readonly Item[])
 }
 
 /** The mascot's mood: calm, something changed, or something needs the person. */
+/** The brand's accent: the footer button, the pane's header and the moving lane. */
+export const BLUE = '#5B8DEF'
+
 export type MascotState = 'calm' | 'changed' | 'needs-you'
 
 export function mascotState(items: readonly Item[]): MascotState {
@@ -390,7 +416,7 @@ export type BandPart = { text: string; color?: string; bold?: boolean; dim?: boo
  * The band's counts, fitted to the columns it has: full words when wide, short words when not,
  * and the mascot alone at the narrowest. Answers whether the buttons fit too.
  */
-export function bandLayout(items: readonly Item[], columns: number, extra: readonly BandPart[] = []): { parts: BandPart[]; hasButtons: boolean } {
+export function bandLayout(items: readonly Item[], columns: number, extra: readonly BandPart[] = []): { parts: BandPart[] } {
   const tally = counts(items)
   const state = mascotState(items)
   const mascot: BandPart = { text: '⚛', color: MASCOT_COLORS[state], bold: state === 'needs-you' }
@@ -399,16 +425,14 @@ export function bandLayout(items: readonly Item[], columns: number, extra: reado
     : { need: 'need', moving: 'mov', waiting: 'wait' }
   const counted: BandPart[] = [
     { text: `${tally['needs-you']} ${words.need}`, color: tally['needs-you'] ? MASCOT_COLORS['needs-you'] : undefined, bold: tally['needs-you'] > 0, dim: tally['needs-you'] === 0 },
-    { text: `${tally.moving} ${words.moving}`, color: 'cyan' },
+    { text: `${tally.moving} ${words.moving}`, color: BLUE },
     { text: `${tally.waiting} ${words.waiting}`, dim: true },
   ]
   const line = (parts: BandPart[]) => parts.map(one => one.text).join(' · ').length + 2
-  const hasButtons = columns >= 44
-  const room = columns - (hasButtons ? 18 : 0)
-  if (extra.length > 0 && line([...counted, ...extra]) <= room) return { parts: [mascot, ...counted, ...extra], hasButtons }
-  if (line(counted) <= room) return { parts: [mascot, ...counted], hasButtons }
-  if (columns >= 12) return { parts: [mascot, counted[0]!], hasButtons: false }
-  return { parts: [mascot], hasButtons: false }
+  if (extra.length > 0 && line([...counted, ...extra]) <= columns) return { parts: [mascot, ...counted, ...extra] }
+  if (line(counted) <= columns) return { parts: [mascot, ...counted] }
+  if (columns >= 12) return { parts: [mascot, counted[0]!] }
+  return { parts: [mascot] }
 }
 
 /**
@@ -430,3 +454,123 @@ export const SIDEBAR_ROW =
   `[{ token = "$watchmen_alert", fg = "${MASCOT_COLORS['needs-you']}", bold = true }, ` +
   `{ token = "$watchmen_changed", fg = "${MASCOT_COLORS.changed}" }, ` +
   `{ token = "$watchmen_quiet", dim = true }]`
+
+/**
+ * The pane as a desktop widget, read at a glance: the lane counts, then the first item that needs
+ * the human (else the first that changed, else that nothing does), cleaned for display.
+ */
+export function glance(items: readonly Item[]): { counts: string; first: string; isNeedsYou: boolean } {
+  const tally = counts(items)
+  const line = `${tally['needs-you']} need you · ${tally.moving} moving · ${tally.waiting} waiting`
+  const needs = items.find(one => one.lane === 'needs-you')
+  if (needs) return { counts: line, first: sanitize(needs.note ? `${needs.title}: ${needs.note}` : needs.title), isNeedsYou: true }
+  const changed = items.find(one => one.isChanged && one.lane !== 'done')
+  if (changed) return { counts: line, first: sanitize(`changed: ${changed.title}`), isNeedsYou: false }
+  return { counts: line, first: 'Nothing needs you.', isNeedsYou: false }
+}
+
+/** The prompt that has the watch speak first on a new day. */
+export const BRIEF_PROMPT =
+  "◆ morning — give the human the day's brief: call board_changes, then say what needs them first and what moved, in a few sentences."
+
+/** The local calendar day and hour of a time: what the morning brief is scheduled by. */
+export function localDay(now: number): { day: string; hour: number } {
+  const at = new Date(now)
+  const pad = (value: number) => String(value).padStart(2, '0')
+  return { day: `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())}`, hour: at.getHours() }
+}
+
+/** The hour the morning brief is due from: WATCHMEN_BRIEF_HOUR when it is 0-23, else 9. */
+export function briefHourOf(value: string | undefined): number {
+  return value !== undefined && /^[0-9]{1,2}$/.test(value) && Number(value) <= 23 ? Number(value) : 9
+}
+
+/**
+ * Whether the morning brief is due: at or past the brief hour on a day not briefed yet, once the
+ * start briefing has gone in, never over a running turn, the person's typing or a rotation, no
+ * sooner after a wake than wakes allow, and not within BRIEF_RETRY_MS of a brief that failed.
+ */
+/** How long a morning brief that failed to go in waits before the next try. */
+export const BRIEF_RETRY_MS = 10 * 60_000
+
+export function isBriefDue(input: {
+  isBriefingPending?: boolean
+  lastFailedAt?: number
+  day: string
+  hour: number
+  briefHour: number
+  lastBriefDay?: string
+  now: number
+  lastWakeAt?: number
+  isTurnRunning: boolean
+  isRotating: boolean
+  draft: string
+}): boolean {
+  if (input.hour < input.briefHour || input.lastBriefDay === input.day) return false
+  if (input.isBriefingPending) return false
+  if (input.lastFailedAt !== undefined && input.now - input.lastFailedAt < BRIEF_RETRY_MS) return false
+  if (input.isTurnRunning || input.isRotating || input.draft.trim() !== '') return false
+  return input.lastWakeAt === undefined || input.now - input.lastWakeAt >= WAKE_EVERY_MS
+}
+
+/** How long the person must have been away for the band to say what happened meanwhile. */
+export const AWAY_MS = 60 * 60_000
+
+/**
+ * What the band says when the person comes back after AWAY_MS or more: how many items came into
+ * needs-you since they last typed, and how many others moved lane or changed. Undefined when they
+ * were not away that long, or nothing happened.
+ */
+export function sinceYouLooked(
+  looked: { at: number; lanes: Record<string, Lane> } | undefined,
+  items: readonly Item[],
+  now: number,
+): string | undefined {
+  if (!looked || now - looked.at < AWAY_MS) return undefined
+  let need = 0
+  let moved = 0
+  for (const one of items) {
+    const before = looked.lanes[one.id]
+    const isChangedSince = (one.changedAt ?? 0) > looked.at
+    if (one.lane === 'needs-you' && before !== 'needs-you') need += 1
+    else if (before !== one.lane || isChangedSince) moved += 1
+  }
+  return need + moved === 0 ? undefined : `since you looked: ${need} need you · ${moved} moved`
+}
+
+/** Each item's lane by id: what the person saw when they last typed. */
+export function lanesOf(items: readonly Item[]): Record<string, Lane> {
+  return Object.fromEntries(items.map(one => [one.id, one.lane]))
+}
+
+/** The kinds of item the person dismissed unattended, and the kinds the watch already asked about. */
+export type Ignored = { counts: Record<string, number>; asked: string[] }
+/** How many dismissed items of one kind make the watch ask whether to stop raising that kind. */
+export const IGNORE_AFTER = 2
+
+/**
+ * Whether dropping an item dismisses it unattended: it sat in needs-you and was taken off the board
+ * rather than dealt with. A move to done is ordinary triage and never counts, nor does an item
+ * without a kind.
+ */
+export function isDismissed(item: Item): boolean {
+  return !!item.kind && item.lane === 'needs-you'
+}
+
+export function noteDismissed(state: Ignored, kind: string): Ignored {
+  return { ...state, counts: { ...state.counts, [kind]: (state.counts[kind] ?? 0) + 1 } }
+}
+
+/**
+ * The one line board_changes adds when a kind has been dismissed IGNORE_AFTER times and the watch
+ * has not asked about it yet, and the state with that kind marked asked.
+ */
+export function dismissedQuestion(state: Ignored, aboutYou = '.companion/about-you.md'): { line?: string; state: Ignored } {
+  const kind = Object.keys(state.counts).find(one => state.counts[one]! >= IGNORE_AFTER && !state.asked.includes(one))
+  if (kind === undefined) return { state }
+  const shown = sanitize(kind).slice(0, 40)
+  return {
+    line: `The human dismissed ${state.counts[kind]} '${shown}' items without acting on them. Ask them once, in one sentence, whether to stop raising '${shown}' items; if they agree, add a line saying so to ${aboutYou}.`,
+    state: { ...state, asked: [...state.asked, kind] },
+  }
+}

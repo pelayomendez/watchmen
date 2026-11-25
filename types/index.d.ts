@@ -1,4 +1,9 @@
 export type Watch = {
+  /**
+   * The folder the watch started in, absolute: its board, handoffs and about-you live in its
+   * .companion/, wherever the session's shell goes later. Missing in state an older version wrote.
+   */
+  workspace?: string
   handoff?: string
   skill?: string
   startedAt: number
@@ -17,6 +22,39 @@ export type Watch = {
   baseTokens?: number
   /** A rotation under way: the handoff asked for (before: the newest handoff then), or the resume sent. */
   rotation?: { phase: 'handoff' | 'resume'; since: number; before?: string }
+  /** The local hour the morning brief is due from (WATCHMEN_BRIEF_HOUR at start, else 9). */
+  briefHour?: number
+  /** The local day (YYYY-MM-DD) the watch last spoke first on, or started on past the brief hour. */
+  lastBriefDay?: string
+  /** Set while /watchmen start's briefing has not gone in yet: no morning brief before it. */
+  isBriefingPending?: boolean
+  /** When the last morning brief failed to go in: the next try waits BRIEF_RETRY_MS. */
+  briefFailedAt?: number
+  /** Park inbox entries already applied, as `<sessionId>:<at>`, so one is never applied twice. */
+  appliedParks?: string[]
+  /** Take records already applied, as `<sessionId>:<id>:<at>`, so one never overrides a later move. */
+  appliedTakes?: string[]
+  /** Parked sessions no live watch covers: the dim line in the band and the pane. */
+  orphanNote?: string
+  /** The orphan line board_changes last reported, so it is mentioned once. */
+  orphanAnnounced?: string
+  /** When the person last typed in the watch, and each item's lane then. */
+  looked?: { at: number; lanes: Record<string, Lane> }
+  /** What happened while they were away, shown in the band until they type again. */
+  sinceNote?: string
+}
+
+/** A /watchmen park under way in this session: the handoff it waits for, and since when. */
+export type Park = {
+  path: string
+  sessionId: string
+  since: number
+  /** The handoff's text when park began, if the file was already there: a rewrite is what counts. */
+  before?: string
+  lane?: 'waiting' | 'todo'
+  note?: string
+  /** The workspace of the watch it goes to when no watch covers it (--to, or the only one running). */
+  to?: string
 }
 
 /** What the band shows of the watch itself: its context fill and how long it has been idle. */
@@ -60,6 +98,6 @@ export type Item = {
 
 declare module 'claude-code' {
   interface PluginState {
-    watchmen: { watch: Watch; board: Item[]; vitals: Vitals }
+    watchmen: { watch: Watch; board: Item[]; vitals: Vitals; park: Park | null }
   }
 }

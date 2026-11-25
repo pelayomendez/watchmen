@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Item, Vitals, Watch } from '../types'
+import type { Item, Lane, Park, Vitals, Watch } from '../types'
 import {
   applyToBoard,
   approvalLines,
@@ -19,32 +19,90 @@ import {
   serialize,
   bandLayout,
   mascotState,
+  MASCOT_COLORS,
+  BLUE,
   paintAtom,
   sidebarTokens,
   enteredNeedsYou,
   queueWake,
   sanitize,
+  hasHidden,
   wakePrompt,
   sidebarToken,
   isSafeHerdrArg,
   vitals,
   isRotationDue,
-  ROTATE_PROMPT,
+  rotatePrompt,
   resumePrompt,
   summary,
+  glance,
+  BRIEF_PROMPT,
+  briefHourOf,
+  isBriefDue,
+  localDay,
+  lanesOf,
+  sinceYouLooked,
+  dismissedQuestion,
+  isDismissed,
+  noteDismissed,
   track,
 } from './board'
-import type { CheckOutcome, CheckResult, ItemPatch } from './board'
+import type { CheckOutcome, CheckResult, Ignored, ItemPatch } from './board'
+import { briefing, pickModel, skillCandidates } from './briefing'
+import {
+  DISCOVERY_TIMEOUT_MS,
+  foundSection,
+  glabHosts,
+  glabLookups,
+  glabReviewLookup,
+  lookups as lookupsAt,
+  notOnBoard,
+  parseGh,
+  parseGlab,
+  parseJira,
+  projectDirName,
+  RECENT_SESSION_MS,
+  recentSessions,
+  usernameOf,
+} from './discover'
+import type { Found } from './discover'
+import {
+  covers,
+  coveringOf,
+  isAbsolutePath,
+  orphanLine,
+  orphans,
+  parentOf,
+  repoRootOf,
+  shortPath,
+  PARK_GIVE_UP_MS,
+  parkedItem,
+  parkedReport,
+  parkPrompt,
+  parseFrontMatter,
+  parseInboxEntry,
+  parseParkArgs,
+  resumeCommand,
+  shortId,
+  stateDirOf,
+} from './park'
+import type { InboxEntry } from './park'
+import { handoffOf, isTakeable, openItems, parseTakeArgs, parseTakeRecord, resumeOf, takeList, takenMove, takePrompt, takeRecordText } from './take'
+import type { TakeRecord } from './take'
 
-// Watchmen only wakes in the session the launcher starts (WATCHMEN=1), so the plugin can be
-// installed everywhere and stay silent in every other session. The persona and the briefing are
-// the launcher's (--append-system-prompt): a user-installed plugin's prompt.compose hook is
-// bypassed by Claude Code's built-in security plugin, so this module keeps the board and shows it.
+// Watchmen keeps the watch in one session: the one the launcher starts (WATCHMEN=1, the briefing
+// as --append-system-prompt), or one where the person types /watchmen start (the desktop app can
+// pass neither, so the briefing goes in as the first message). Every other session gets only
+// /watchmen, which says how to start, so the plugin can be installed everywhere and stay quiet.
+// A user-installed plugin's prompt.compose hook is bypassed by Claude Code's built-in security
+// plugin, so the briefing never goes through prompt.compose.
 
 const HANDOFF_DIR = '.companion'
 const HANDOFF_PREFIX = 'handoff-'
-const BOARD_FILE = `${HANDOFF_DIR}/board.json`
-const BOARD_TEMP = `${BOARD_FILE}.tmp`
+// Every .companion path is the workspace's, fixed when the watch starts: a watch whose shell cds
+// into a subfolder (a git worktree below the workspace) still writes the one board.
+const companionOf = (workspace: string) => `${workspace.replace(/\/+$/, '')}/${HANDOFF_DIR}`
+const boardFileOf = (workspace: string) => `${companionOf(workspace)}/board.json`
 const TICK_MS = 15_000
 // Three ticks: the sidebar token outlives one missed refresh, not a watch that has ended.
 const SIDEBAR_TTL_MS = 45_000
@@ -52,9 +110,61 @@ const HANDOFF_AT = 75
 const PANE = 'board'
 const PANE_TITLE = '⚛ watchmen'
 const NOT_WATCH = 'Watchmen is not keeping the watch in this session.'
+const HOW_TO_START = `${NOT_WATCH} Type /watchmen start to make this session the watch.`
+const COMMAND_IDLE = {
+  name: 'watchmen',
+  description: 'Start the watch in this session (start), hand this session to the watch (park), or take an item off its board (take)',
+  argumentHint: 'start | park [waiting|todo] [note] [--to <workspace>] | take [id] [--to <workspace>]',
+}
+const COMMAND_WATCH = {
+  name: 'watchmen',
+  description: 'The watch: open the board, or track <title> | done <id> [note] | brief | band | approve <id> <hash> | reload | reset',
+  argumentHint: '[track <title> | done <id> [note] | brief | band | approve <id> <hash> | approve all | reload | reset]',
+}
+// Who may turn a session into the watch: the person, typing (in a terminal, through the bridge, or
+// in a session an SDK host such as the desktop app runs), never the model or another plugin.
+const STARTERS: readonly string[] = ['composer', 'bridge', 'sdk']
 
 const WATCH = { plugin: 'watchmen', key: 'watch' } as const
 const VITALS = { plugin: 'watchmen', key: 'vitals' } as const
+const PARK = { plugin: 'watchmen', key: 'park' } as const
+// How fresh a watch's heartbeat must be for a parked session to say the watch has it.
+const HEARTBEAT_MS = 60_000
+// The sessions that keep a watch, by session id, in the store. $.state lives as long as the
+// process: when Claude Code restarts (an update, a crash) and the session is resumed, the state is
+// empty, and this is how the session finds out it was the watch, and of which workspace.
+const WATCH_SESSIONS = 'watch-sessions'
+const WATCH_SESSIONS_KEPT = 20
+type WatchSessions = Record<string, { workspace: string; at: number }>
+
+/** The kept watch sessions, newest first, cut to WATCH_SESSIONS_KEPT; anything malformed dropped. */
+export function watchSessionsOf(kept: unknown): WatchSessions {
+  if (!kept || typeof kept !== 'object' || Array.isArray(kept)) return {}
+  const valid = Object.entries(kept as Record<string, unknown>).filter(
+    (one): one is [string, { workspace: string; at: number }] => {
+      const value = one[1] as { workspace?: unknown; at?: unknown } | null
+      return !!value && typeof value.workspace === 'string' && value.workspace.startsWith('/') && typeof value.at === 'number'
+    },
+  )
+  return Object.fromEntries(valid.sort((a, b) => b[1].at - a[1].at).slice(0, WATCH_SESSIONS_KEPT))
+}
+
+// How old a session's record may grow before the watch writes it again, so a long-running watch
+// stays among the newest kept.
+const WATCH_SESSION_REFRESH_MS = 60 * 60_000
+
+/**
+ * The kept watch sessions with `id` keeping `workspace` now: one session per workspace, so a session
+ * an older watch ran in (before a newer one took the folder, or before a /clear gave it a new id)
+ * is never made the watch again. Undefined when nothing needs writing.
+ */
+export function rememberedSessions(kept: WatchSessions, id: string, workspace: string, now: number): WatchSessions | undefined {
+  const held = kept[id]
+  const others = Object.entries(kept).filter(([key, value]) => key !== id && value.workspace === workspace)
+  if (held?.workspace === workspace && now - held.at < WATCH_SESSION_REFRESH_MS && others.length === 0) return undefined
+  const rest = Object.fromEntries(Object.entries(kept).filter(([key, value]) => key !== id && value.workspace !== workspace))
+  return watchSessionsOf({ ...rest, [id]: { workspace, at: now } })
+}
 const board = atom({ plugin: 'watchmen', key: 'board' } as const, [])
 const vitalsAtom = atom({ plugin: 'watchmen', key: 'vitals' } as const, {} as Vitals)
 
@@ -92,17 +202,89 @@ async function sha256(text: string): Promise<string> {
  * execution, and a board.json or a board_track call can come from anyone who can write to the repo
  * or the conversation, so no check runs until the human approves its exact argv here.
  */
-// The band's board button opens the board pane: lanes and items laid out, closed with Escape. A
-// press counts as the person asking, so the pane is placed at any width; should it still not be,
-// the brief goes into the transcript instead. (It cannot run /watchmen: $.command.run from a
-// plugin skips that plugin's own command.run hook, so nothing would answer.)
-async function showBoard($: EngineInterface, items: readonly Item[]): Promise<void> {
-  const opened = await $.ui.open({ id: PANE, title: PANE_TITLE, closeOnEscape: true }).catch(() => undefined)
-  if (!opened?.isPlaced) $.ui.log(summary(items))
+// The footer button and /watchmen open the board pane with the keyboard, closed with Escape. Open
+// again while it is open, it only takes the keyboard back: one way in, never a toggle. A press
+// counts as the person asking, so the pane is placed at any width; should it still not be, the
+// brief goes into the transcript instead. (It cannot run /watchmen: $.command.run from a plugin
+// skips that plugin's own command.run hook, so nothing would answer.)
+async function showBoard($: EngineInterface): Promise<void> {
+  const opened = await $.ui.open({ id: PANE, title: PANE_TITLE, focus: true, closeOnEscape: true }).catch(() => undefined)
+  if (!opened?.isPlaced) $.ui.log(summary(await read($, board)))
+}
+
+/** Puts `text` at the start of the prompt box, keeping what was typed after it (yatsude's fill). */
+async function fill($: EngineInterface, text: string) {
+  const draft = (await $.prompt.read().catch(() => ({ text: '' }))).text
+  const filled = await $.prompt.fill({ text: text + draft.trimStart(), mode: 'replace' }).catch(() => ({ isFilled: false }))
+  if (!filled.isFilled) $.ui.toast(`Could not fill the prompt: type ${text.trim()}`)
+}
+
+/** The pane's ↻: every check on the board runs now, its interval aside (approval still applies). */
+async function checkNow($: EngineInterface) {
+  const now = await $.clock.now()
+  for (const item of await read($, board)) {
+    if (!item.check || item.lane === 'done' || running.has(item.id)) continue
+    void runCheck($, item, now).catch(error => $.ui.log(`watchmen: check ${item.id} failed: ${String(error)}`))
+  }
+}
+
+/** The mascot, block style: an owl with a hydrogen atom on its forehead. Drawn when the pane has room. */
+const OWL = [
+  '  ▄▀▄▄▄▄▄▄▄▀▄    ',
+  '  █   ·⊛·   █    ',
+  '  █  ◉   ◉  █    ',
+  '  ▀▄   ▾   ▄▀    ',
+  '    ▀▀▙▄▟▀▀      ',
+]
+const ART_WIDTH = 17
+const TAGLINE = ['Tell it what to watch.', 'It tells you what needs you.']
+const BRIEF_ASK = 'Brief me: what needs me first, then what moved. '
+const WATCH_ASK = 'Watch '
+const RED = MASCOT_COLORS['needs-you']
+const AMBER = MASCOT_COLORS.changed
+/** Done items listed one by one up to this many; more fold into a count. */
+const DONE_SHOWN = 3
+
+/**
+ * The watch's workspace: the folder it started in, kept in its state. A watch started by an older
+ * version has none; until startWatch records one, the session's folder stands in.
+ */
+async function workspaceOf($: EngineInterface): Promise<string> {
+  return (await $.state.get(WATCH)).value?.workspace ?? (await $.session.cwd())
+}
+
+// What the person dismissed unattended, by kind, kept per workspace across sessions.
+async function ignoredKey($: EngineInterface): Promise<string> {
+  return `ignored:${await sha256(await workspaceOf($))}`
+}
+
+async function readIgnored($: EngineInterface): Promise<Ignored> {
+  const kept = (await $.store.get(await ignoredKey($))) as Partial<Ignored> | undefined
+  return { counts: { ...(kept?.counts ?? {}) }, asked: [...(kept?.asked ?? [])] }
+}
+
+// Changes to what was dismissed run one after another, each reading what the last one wrote, so
+// two drops at once both count.
+let ignoring: Promise<unknown> = Promise.resolve()
+
+function changeIgnored<T>($: EngineInterface, fn: (state: Ignored) => { state?: Ignored; value: T }): Promise<T> {
+  const run = ignoring.then(async () => {
+    const out = fn(await readIgnored($))
+    if (out.state) await $.store.set(await ignoredKey($), out.state)
+    return out.value
+  })
+  ignoring = run.catch(() => undefined)
+  return run
+}
+
+/** Counts an item dropped while it sat in needs-you. */
+async function countDismissed($: EngineInterface, item: Item | undefined) {
+  if (!item || !isDismissed(item)) return
+  await changeIgnored($, state => ({ state: noteDismissed(state, item.kind!), value: undefined }))
 }
 
 async function commandHash($: EngineInterface, argv: readonly string[]): Promise<string> {
-  return sha256(JSON.stringify([await $.session.cwd(), argv]))
+  return sha256(JSON.stringify([await workspaceOf($), argv]))
 }
 
 async function approvalKey($: EngineInterface, argv: readonly string[]): Promise<string> {
@@ -121,6 +303,20 @@ async function isApproved($: EngineInterface, argv: readonly string[]): Promise<
   return (await $.store.get(await approvalKey($, argv))) === true
 }
 
+/** Every check on the board (not done) whose command is not approved yet, sorted by id. */
+async function pendingChecks($: EngineInterface): Promise<{ id: string; argv: string[] }[]> {
+  const pending: { id: string; argv: string[] }[] = []
+  for (const item of await read($, board)) {
+    if (item.check && item.lane !== 'done' && !(await isApproved($, item.check.argv))) pending.push({ id: item.id, argv: [...item.check.argv] })
+  }
+  return pending.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+}
+
+/** The short hash the person types to approve exactly this set of checks, in this workspace. */
+async function setHash($: EngineInterface, pending: readonly { id: string; argv: readonly string[] }[]): Promise<string> {
+  return (await sha256(JSON.stringify([await workspaceOf($), pending.map(one => [one.id, one.argv])]))).slice(0, 16)
+}
+
 // Saves run one after another, each writing the board as it stands when its turn comes, so a slow
 // save never lands after a newer one. Each writes a temp file and renames it over board.json.
 let saving: Promise<void> = Promise.resolve()
@@ -134,9 +330,10 @@ async function writeBoard($: EngineInterface) {
   const watch = (await $.state.get(WATCH)).value
   // A board.json the watch could not read is never written over until the human reloads or resets.
   if (!watch || watch.boardError) return
+  const file = boardFileOf(watch.workspace ?? (await $.session.cwd()))
   try {
-    await $.fs.write(BOARD_TEMP, serialize(await read($, board)))
-    const moved = await $.process.run(['mv', '-f', BOARD_TEMP, BOARD_FILE])
+    await $.fs.write(`${file}.tmp`, serialize(await read($, board)))
+    const moved = await $.process.run(['mv', '-f', `${file}.tmp`, file])
     if (moved.exitCode !== 0) throw new Error(moved.stderr.trim() || `mv exited ${moved.exitCode}`)
   } catch (error) {
     $.ui.log(`watchmen: could not save the board: ${String(error)}`)
@@ -152,18 +349,20 @@ export function newestBackupOf(names: readonly string[]): string | undefined {
     .at(-1)?.name
 }
 
-async function newestBackup($: EngineInterface): Promise<string | undefined> {
-  const entries = (await $.fs.exists(HANDOFF_DIR)) ? await $.fs.list(HANDOFF_DIR) : []
+async function newestBackup($: EngineInterface, workspace: string): Promise<string | undefined> {
+  const dir = companionOf(workspace)
+  const entries = (await $.fs.exists(dir)) ? await $.fs.list(dir) : []
   return newestBackupOf(entries.filter(one => one.kind === 'file').map(one => one.name))
 }
 
 /** Loads board.json. One it cannot read is copied to a timestamped .bak and blocks every save. */
-async function loadBoard($: EngineInterface): Promise<string | undefined> {
-  if (!(await $.fs.exists(BOARD_FILE))) {
+async function loadBoard($: EngineInterface, workspace: string): Promise<string | undefined> {
+  const file = boardFileOf(workspace)
+  if (!(await $.fs.exists(file))) {
     await update($, board, () => [])
     return undefined
   }
-  const text = await $.fs.read(BOARD_FILE)
+  const text = await $.fs.read(file)
   const parsed = parseBoard(text)
   if ('items' in parsed) {
     await update($, board, () => parsed.items)
@@ -171,9 +370,9 @@ async function loadBoard($: EngineInterface): Promise<string | undefined> {
   }
   // The board in memory is left as it is: empty at start, and kept when a reload fails. Each
   // unreadable copy gets a backup of its own, so a later failure never replaces an earlier backup.
-  const backup = `${BOARD_FILE}.${await $.clock.now()}.bak`
-  const newest = await newestBackup($)
-  const isKept = newest !== undefined && (await $.fs.read(`${HANDOFF_DIR}/${newest}`)) === text
+  const backup = `${file}.${await $.clock.now()}.bak`
+  const newest = await newestBackup($, workspace)
+  const isKept = newest !== undefined && (await $.fs.read(`${companionOf(workspace)}/${newest}`)) === text
   if (!isKept && !(await $.fs.exists(backup))) await $.fs.write(backup, text)
   $.ui.toast(
     `board.json could not be read (${parsed.error}). Kept as ${backup}; board.json will not be written over. Fix it and /watchmen reload, or /watchmen reset.`,
@@ -212,6 +411,41 @@ let isPaneOffered = false
 
 async function isWatch($: EngineInterface) {
   return (await $.state.get(WATCH)).value !== undefined
+}
+
+/** Records that this session keeps the watch of `workspace`, unless the store already says so. */
+async function rememberWatch($: EngineInterface, workspace: string): Promise<void> {
+  const next = rememberedSessions(watchSessionsOf(await $.store.get(WATCH_SESSIONS)), await $.session.id(), workspace, await $.clock.now())
+  if (next) await $.store.set(WATCH_SESSIONS, next)
+}
+
+/** The workspace this session kept the watch of before the process restarted, if it did. */
+async function rememberedWatch($: EngineInterface): Promise<string | undefined> {
+  const kept = watchSessionsOf(await $.store.get(WATCH_SESSIONS).catch(() => undefined))
+  return kept[await $.session.id()]?.workspace
+}
+
+/** Forgets this session as a watch: another session has taken its workspace. */
+async function forgetWatch($: EngineInterface): Promise<void> {
+  const id = await $.session.id()
+  const kept = watchSessionsOf(await $.store.get(WATCH_SESSIONS))
+  if (!(id in kept)) return
+  const { [id]: _, ...rest } = kept
+  await $.store.set(WATCH_SESSIONS, rest)
+}
+
+/** The session whose heartbeat for `workspace` is fresh, when it names one that is not this one. */
+async function otherWatchOf($: EngineInterface, workspace: string): Promise<boolean> {
+  const dir = await stateDir($)
+  if (!dir) return false
+  try {
+    const beat = JSON.parse(String(await $.fs.read(await heartbeatFile(dir, workspace)))) as { at?: unknown; sessionId?: unknown }
+    // A beat with no session id came from an older version: most likely this session's own.
+    if (typeof beat.at !== 'number' || (await $.clock.now()) - beat.at >= HEARTBEAT_MS || typeof beat.sessionId !== 'string') return false
+    return beat.sessionId !== (await $.session.id())
+  } catch {
+    return false
+  }
 }
 
 /** Marks an item's check as waiting for approval of the command with this short hash, or clears it. */
@@ -346,6 +580,42 @@ async function maybeWake($: EngineInterface, now: number) {
 }
 
 /**
+ * The morning brief: on the first tick of a new local day at or past the brief hour, the watch is
+ * asked to speak first, once that day. It counts as a wake for the wake rate limit.
+ */
+async function maybeBrief($: EngineInterface, now: number) {
+  if (isWaking) return
+  const watch = (await $.state.get(WATCH)).value
+  if (!watch) return
+  const { day, hour } = localDay(now)
+  const draft = (await $.prompt.read()).text
+  const due = isBriefDue({
+    isBriefingPending: watch.isBriefingPending,
+    lastFailedAt: watch.briefFailedAt,
+    day,
+    hour,
+    briefHour: watch.briefHour ?? 9,
+    lastBriefDay: watch.lastBriefDay,
+    now,
+    lastWakeAt: watch.wake?.lastWakeAt,
+    isTurnRunning,
+    isRotating: watch.rotation !== undefined,
+    draft,
+  })
+  if (!due) return
+  isWaking = true
+  try {
+    await $.prompt.submit({ text: BRIEF_PROMPT })
+    await patchWatch($, held => ({ ...held, lastBriefDay: day, briefFailedAt: undefined, wake: { pending: held.wake?.pending ?? [], lastWakeAt: now } }))
+  } catch (error) {
+    $.ui.log(`watchmen: the morning brief was not sent: ${String(error)}`)
+    await patchWatch($, held => ({ ...held, briefFailedAt: now }))
+  } finally {
+    isWaking = false
+  }
+}
+
+/**
  * Pings the person about items that just moved into needs-you: a native notification and, inside
  * herdr, a herdr notification, so it reaches them from any tab. Quiet changes never ping.
  */
@@ -361,11 +631,12 @@ async function pingNeedsYou($: EngineInterface, items: readonly Item[]) {
   }
 }
 
-/** The newest handoff in .companion/, as a path, or undefined. */
-async function latestHandoff($: EngineInterface): Promise<string | undefined> {
-  const entries = (await $.fs.exists(HANDOFF_DIR)) ? await $.fs.list(HANDOFF_DIR) : []
+/** The newest handoff in the workspace's .companion/, as an absolute path, or undefined. */
+async function latestHandoff($: EngineInterface, workspace: string): Promise<string | undefined> {
+  const dir = companionOf(workspace)
+  const entries = (await $.fs.exists(dir)) ? await $.fs.list(dir) : []
   const name = newestHandoff(entries.filter(one => one.kind === 'file').map(one => one.name))
-  return name && /^[A-Za-z0-9._-]+$/.test(name) ? `${HANDOFF_DIR}/${name}` : undefined
+  return name && /^[A-Za-z0-9._-]+$/.test(name) ? `${dir}/${name}` : undefined
 }
 
 /**
@@ -387,10 +658,11 @@ async function maybeRotate($: EngineInterface, now: number, tokens: number | und
     }
     const draft = (await $.prompt.read()).text
     if (!isRotationDue({ now, lastTurnAt: watch.lastTurnAt, tokens, baseTokens: watch.baseTokens, isTurnRunning, draft })) return
-    const before = await latestHandoff($)
+    const workspace = await workspaceOf($)
+    const before = await latestHandoff($, workspace)
     await patchWatch($, held => ({ ...held, rotation: { phase: 'handoff', since: now, before } }))
     try {
-      await $.prompt.submit({ text: ROTATE_PROMPT })
+      await $.prompt.submit({ text: rotatePrompt(companionOf(workspace)) })
     } catch (error) {
       $.ui.log(`watchmen: rotation not started: ${String(error)}`)
       await patchWatch($, held => ({ ...held, rotation: undefined, lastTurnAt: now }))
@@ -402,8 +674,10 @@ async function maybeRotate($: EngineInterface, now: number, tokens: number | und
     await patchWatch($, held => ({ ...held, rotation: undefined }))
     return
   }
-  const handoff = await latestHandoff($)
-  if (!handoff || handoff === rotation.before) {
+  const handoff = await latestHandoff($, await workspaceOf($))
+  // A handoff kept by an older version is relative to the workspace: the same file counts as before.
+  const before = rotation.before && !rotation.before.startsWith('/') ? `${await workspaceOf($)}/${rotation.before}` : rotation.before
+  if (!handoff || handoff === before) {
     $.ui.log('watchmen: no new handoff was written, so the watch did not rotate.')
     await patchWatch($, held => ({ ...held, rotation: undefined }))
     return
@@ -430,7 +704,7 @@ async function maybeRotate($: EngineInterface, now: number, tokens: number | und
     wake: { pending: [], lastWakeAt: now },
   }))
   try {
-    await $.prompt.submit({ text: resumePrompt(handoff) })
+    await $.prompt.submit({ text: resumePrompt(handoff, await workspaceOf($)) })
   } catch (error) {
     $.ui.log(`watchmen: the conversation was cleared but the resume prompt failed: ${String(error)}. Tell the watch to read ${handoff}.`)
     await patchWatch($, held => ({ ...held, rotation: undefined }))
@@ -446,7 +720,13 @@ async function tick($: EngineInterface) {
     void runCheck($, item, now).catch(error => $.ui.log(`watchmen: check ${item.id} failed: ${String(error)}`))
   }
   if (watch.herdr) void publishSidebar($, watch.herdr, items)
+  const workspace = await workspaceOf($)
+  await takeInbox($, now, workspace).catch(error => $.ui.log(`watchmen: could not read the park inbox: ${String(error)}`))
+  await takeTakes($, workspace).catch(error => $.ui.log(`watchmen: could not read the take inbox: ${String(error)}`))
+  await beat($, now, workspace).catch(() => undefined)
+  await rememberWatch($, workspace).catch(() => undefined)
   if (!watch.rotation) await maybeWake($, now)
+  if (!watch.rotation) await maybeBrief($, now)
   const { context } = await $.session.usage()
   const percent = context.percent ?? 0
   // The watch's figures go in the band, where they can be coloured; a plugin's status line is
@@ -467,74 +747,722 @@ async function tick($: EngineInterface) {
   }
 }
 
+// The board tools, registered only in the watch.
+const BOARD_TOOLS = [
+  {
+    name: 'board_track',
+    description:
+      'Add an item to the watch board, or update the one with the same id. Items are anything worth keeping an eye on (a ticket, an MR, another session, a todo); give one a check command and the watch re-runs it and flags the item when its output changes.',
+    inputSchema: { type: 'object', properties: ITEM_PROPERTIES },
+  },
+  {
+    name: 'board_move',
+    description: 'Move a board item to another lane and/or set its one-line note. Clears its changed flag: use it to triage.',
+    inputSchema: {
+      type: 'object',
+      properties: { id: ITEM_PROPERTIES.id, lane: ITEM_PROPERTIES.lane, note: ITEM_PROPERTIES.note },
+      required: ['id'],
+    },
+  },
+  {
+    name: 'board_drop',
+    description: 'Remove an item from the watch board.',
+    inputSchema: { type: 'object', properties: { id: ITEM_PROPERTIES.id }, required: ['id'] },
+  },
+  {
+    name: 'board_changes',
+    description:
+      'List the board items whose check output changed since the last triage, with what the check says now. Triage each with board_move.',
+    inputSchema: { type: 'object', properties: {} },
+  },
+]
+
+// Whether this environment's check timer runs: a hot reload starts a fresh environment, whose
+// session.start arms it again; a /watchmen start in a session already watching does not.
+let isTicking = false
+
+/**
+ * Makes this session the watch, or picks the watch up again after a hot reload: the watch and the
+ * board in state (board.json loaded only the first time), the command and the board tools
+ * registered, and the check timer running. The launcher's session.start and /watchmen start both
+ * come here. `skill` is where the ambient-companion skill was found, if it was.
+ */
+async function startWatch(
+  $: EngineInterface,
+  skill: string | undefined,
+  isBriefingPending = false,
+  restored?: string,
+): Promise<Watch> {
+  const held = (await $.state.get(WATCH)).value
+  // The command and the tools go in first and the watch is written to state last, so a start that
+  // fails part way leaves no watch behind: /watchmen still offers start, and a retry runs it all.
+  try {
+    await $.command.register(COMMAND_WATCH)
+    for (const tool of BOARD_TOOLS) await $.tool.register({ ...tool, isDeferred: false })
+  } catch (error) {
+    if (!held) await $.command.register(COMMAND_IDLE).catch(() => undefined)
+    throw error
+  }
+  let watch = held
+  // A watch an older version started has no workspace: the folder it is in now becomes it, once.
+  if (watch && !watch.workspace) {
+    const workspace = await $.session.cwd()
+    await patchWatch($, kept => ({ ...kept, workspace: kept.workspace ?? workspace }))
+    watch = (await $.state.get(WATCH)).value ?? { ...watch, workspace }
+  }
+  if (!watch) {
+    // The workspace is fixed here, absolute, and every .companion path is resolved from it. A watch
+    // found again after a restart keeps the one it had, wherever the resumed session starts.
+    const workspace = restored ?? (await $.session.cwd())
+    const boardError = await loadBoard($, workspace)
+    const startedAt = await $.clock.now()
+    const briefHour = briefHourOf((await $.env.get('WATCHMEN_BRIEF_HOUR')) || undefined)
+    const today = localDay(startedAt)
+    watch = {
+      workspace,
+      handoff: await latestHandoff($, workspace),
+      briefHour,
+      ...(isBriefingPending ? { isBriefingPending } : {}),
+      // Started past the brief hour, the watch's opening brief is today's.
+      ...(today.hour >= briefHour ? { lastBriefDay: today.day } : {}),
+      skill,
+      ...(await herdrOf($)),
+      startedAt,
+      warned: false,
+      ...(boardError ? { boardError } : {}),
+    } satisfies Watch
+    await $.state.set(WATCH, watch)
+  }
+  if (watch.workspace) await rememberWatch($, watch.workspace).catch(error => $.ui.log(`watchmen: could not record the watch: ${String(error)}`))
+  // Versions before 0.3 pinned a status line; a reload would leave it on screen, drawn as a warning.
+  $.ui.status(undefined)
+  if (!isTicking) {
+    // The timer is armed before the first tick runs, so a first tick that fails cannot leave it off.
+    isTicking = true
+    $.clock.every(TICK_MS, () => void tick($).catch(error => $.ui.log(`watchmen: tick failed: ${String(error)}`)))
+    void tick($).catch(error => $.ui.log(`watchmen: tick failed: ${String(error)}`))
+  }
+  return watch
+}
+
+/**
+ * The ambient-companion skill, looked for where the launcher's find_skill looks: WATCHMEN_SKILL,
+ * the two skill folders, then the copy the plugin ships.
+ */
+async function findSkill($: EngineInterface): Promise<string | undefined> {
+  try {
+    const home = (await $.env.get('HOME')) || undefined
+    for (const path of skillCandidates(home, (await $.env.get('WATCHMEN_SKILL')) || undefined, $.plugin.root)) {
+      if (await $.fs.exists(path)) return path
+    }
+    return undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** Whether a CLI is installed, by a cheap `which`. */
+async function hasCli($: EngineInterface, name: string): Promise<boolean> {
+  try {
+    return (await $.process.run(['which', name], { timeoutMs: 3_000 })).exitCode === 0
+  } catch {
+    return false
+  }
+}
+
+/** One read-only lookup's output, or nothing when it failed or ran out of time. */
+async function lookup($: EngineInterface, argv: readonly string[]): Promise<string> {
+  try {
+    const run = await $.process.run([...argv], { timeoutMs: DISCOVERY_TIMEOUT_MS })
+    return run.exitCode === 0 ? run.stdout : ''
+  } catch {
+    return ''
+  }
+}
+
+/** The Claude sessions whose transcripts changed in the last three hours, here or below. */
+async function recentClaudeSessions($: EngineInterface): Promise<{ count: number; folders: string[] }> {
+  const none = { count: 0, folders: [] }
+  try {
+    const home = (await $.env.get('HOME')) || undefined
+    if (!home) return none
+    const cwd = await workspaceOf($)
+    const root = `${home}/.claude/projects`
+    if (!(await $.fs.exists(root))) return none
+    const own = projectDirName(cwd)
+    const dirs = (await $.fs.list(root)).filter(one => one.kind === 'dir' && (one.name === own || one.name.startsWith(`${own}-`)))
+    const listed = await Promise.all(
+      dirs.map(async dir => ({
+        name: dir.name,
+        mtimes: (await $.fs.list(`${root}/${dir.name}`).catch(() => [])).filter(one => one.kind === 'file' && one.name.endsWith('.jsonl')).map(one => one.mtimeMs),
+      })),
+    )
+    return recentSessions(cwd, listed, (await $.clock.now()) - RECENT_SESSION_MS)
+  } catch {
+    return none
+  }
+}
+
+/**
+ * First-run discovery: the fixed, read-only lookups (discover.ts), each only where its CLI is
+ * installed, failures ignored. Answers the briefing's "Found" section, or undefined.
+ */
+/**
+ * The GitLab hosts glab is set up for, from its config.yml (only the host names: tokens are never
+ * read out or shown). glab run directly uses its default host, so each host is asked by name.
+ */
+async function glabConfigHosts($: EngineInterface): Promise<string[]> {
+  const home = (await $.env.get('HOME')) || undefined
+  const own = (await $.env.get('GLAB_CONFIG_DIR')) || undefined
+  const config = (await $.env.get('XDG_CONFIG_HOME')) || (home ? `${home}/.config` : undefined)
+  const candidates = [
+    ...(own ? [`${own}/config.yml`] : []),
+    ...(home ? [`${home}/Library/Application Support/glab-cli/config.yml`] : []),
+    ...(config ? [`${config}/glab-cli/config.yml`] : []),
+  ]
+  for (const path of candidates) {
+    if (!(await $.fs.exists(path).catch(() => false))) continue
+    return glabHosts(String(await $.fs.read(path).catch(() => '')))
+  }
+  return []
+}
+
+async function discover($: EngineInterface): Promise<string | undefined> {
+  const [gh, glab, acli] = await Promise.all(['gh', 'glab', 'acli'].map(name => hasCli($, name)))
+  const now = await $.clock.now()
+  const searches = lookupsAt(now)
+  const jobs: Promise<Found[]>[] = []
+  if (gh) {
+    jobs.push(lookup($, searches.ghAuthored).then(out => parseGh(out, 'author')))
+    jobs.push(lookup($, searches.ghReview).then(out => parseGh(out, 'reviewer')))
+  }
+  if (glab) {
+    const hosts = await glabConfigHosts($)
+    for (const host of hosts.length > 0 ? hosts : [undefined]) {
+      const on = glabLookups(host, now)
+      jobs.push(lookup($, on.authored).then(out => parseGlab(out, 'author')))
+      jobs.push(
+        lookup($, on.user).then(async out => {
+          const argv = glabReviewLookup(usernameOf(out), host, now)
+          return argv ? parseGlab(await lookup($, argv), 'reviewer') : []
+        }),
+      )
+    }
+  }
+  if (acli) jobs.push(lookup($, searches.jira).then(parseJira))
+  const found = (await Promise.all(jobs)).flat()
+  return foundSection(notOnBoard(found, await read($, board)), await recentClaudeSessions($))
+}
+
+// ---- Park: a session hands its work to the watch.
+
+async function stateDir($: EngineInterface): Promise<string | undefined> {
+  return stateDirOf((await $.env.get('XDG_STATE_HOME')) || undefined, (await $.env.get('HOME')) || undefined)
+}
+
+// This environment's park timer, so a second /watchmen park does not start another.
+let isParkTicking = false
+
+/** /watchmen park in a session that is not the watch: ask for the handoff, then wait for it. */
+async function startPark($: EngineInterface, args: string): Promise<string> {
+  if ((await $.state.get(PARK)).value) return 'This session is already being parked: its handoff is on the way.'
+  const dir = await stateDir($)
+  if (!dir) return 'Cannot park: neither XDG_STATE_HOME nor HOME is set, so there is nowhere to keep the handoff.'
+  const home = (await $.env.get('HOME')) || undefined
+  const { lane, note, to: asked, error } = parseParkArgs(args, home)
+  if (error) return `Not parked: ${error}.`
+  const sessionId = await $.session.id()
+  const now = await $.clock.now()
+  // Which watch gets it is settled now, before the session writes anything: the one covering this
+  // folder, the one asked for, or, when none covers it, the only one running. Several running and
+  // none covering, the person picks with --to.
+  const cwd = await $.session.cwd()
+  const found = await watchFor($, dir, now, { cwd, ...optional('repoRoot', await repoRootAt($, cwd)) }, asked)
+  if ('several' in found) return severalWatches('park', found.several, cwd, home)
+  // Pinned to one watch when it was not found by coverage, or when nested watches both cover it
+  // (else both would take the entry).
+  const to = found.workspace !== undefined && (found.how !== 'covers' || found.isNested) ? found.workspace : undefined
+  const path = `${dir}/parked/${localDay(now).day}-${shortId(sessionId)}.md`
+  const before = (await $.fs.exists(path)) ? String(await $.fs.read(path).catch(() => '')) : undefined
+  const park: Park = {
+    path,
+    sessionId,
+    since: now,
+    ...(before !== undefined ? { before } : {}),
+    ...(lane ? { lane } : {}),
+    ...(note ? { note } : {}),
+    ...(to ? { to } : {}),
+  }
+  await $.state.set(PARK, park)
+  // A command.run hook cannot submit a prompt: a timer sends it once the command has answered.
+  $.clock.after(0, () => {
+    void $.prompt.submit({ text: parkPrompt(path, lane, note), asUser: true }).catch(error => $.ui.log(`watchmen: the park request was not sent: ${String(error)}`))
+  })
+  if (!isParkTicking) {
+    isParkTicking = true
+    $.clock.every(TICK_MS, () => void checkPark($).catch(error => $.ui.log(`watchmen: park failed: ${String(error)}`)))
+  }
+  return `Parking: this session writes its handoff to ${path}, then it goes to the watch.`
+}
+
+const optional = <K extends string, V>(key: K, value: V | undefined): { [P in K]?: V } => (value === undefined ? {} : ({ [key]: value } as { [P in K]?: V }))
+
+/**
+ * The watch a session outside it talks to: the one asked for with --to; else the deepest live
+ * watch whose workspace covers the session's folder or repository; else, when only one watch is
+ * running, that one. Several running and none covering, or none running, it says so.
+ */
+async function watchFor(
+  $: EngineInterface,
+  dir: string,
+  now: number,
+  place: { cwd: string; repoRoot?: string },
+  to: string | undefined,
+): Promise<{ workspace: string; how: 'to' | 'covers' | 'only'; isLive: boolean; isNested?: boolean } | { several: string[] } | { workspace?: undefined }> {
+  const live = [...new Set(await liveWorkspaces($, dir, now))]
+  if (to !== undefined) return { workspace: to, how: 'to', isLive: live.includes(to) }
+  const covering = coveringOf(live, place)
+  // Nested watches both cover a folder deep in both: the deepest is the one meant.
+  if (covering !== undefined) return { workspace: covering, how: 'covers', isLive: true, isNested: live.filter(one => covers(one, place)).length > 1 }
+  if (live.length === 1) return { workspace: live[0]!, how: 'only', isLive: true }
+  if (live.length > 1) return { several: live.sort() }
+  return {}
+}
+
+/** Several watches run and none covers this folder: which ones, and how to pick. */
+function severalWatches(verb: 'park' | 'take', several: readonly string[], cwd: string, home: string | undefined): string {
+  return [
+    `No watch covers ${shortPath(cwd, home)}, and ${several.length} are running:`,
+    ...several.map(one => `  ${shortPath(one, home)}`),
+    `Type /watchmen ${verb === 'park' ? 'park' : 'take [id]'} --to <workspace> with the one you mean.`,
+  ].join('\n')
+}
+
+/** The workspaces of the watches that beat within HEARTBEAT_MS. */
+async function liveWorkspaces($: EngineInterface, dir: string, now: number): Promise<string[]> {
+  const live: string[] = []
+  for (const one of await $.fs.list(`${dir}/heartbeat`).catch(() => [])) {
+    if (one.kind !== 'file' || !one.name.endsWith('.json')) continue
+    try {
+      const beat = JSON.parse(String(await $.fs.read(`${dir}/heartbeat/${one.name}`))) as { cwd?: unknown; at?: unknown }
+      if (isAbsolutePath(beat.cwd) && typeof beat.at === 'number' && now - beat.at < HEARTBEAT_MS) live.push(beat.cwd.replace(/\/+$/, '') || '/')
+    } catch {
+      // A heartbeat that does not read is no watch.
+    }
+  }
+  return live
+}
+
+/** The repository a folder belongs to, as its main worktree's root, when it is in one. */
+async function repoRootAt($: EngineInterface, cwd: string): Promise<string | undefined> {
+  const run = await $.process.run(['git', 'rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd, timeoutMs: 5_000 }).catch(() => undefined)
+  return run && run.exitCode === 0 ? repoRootOf(run.stdout) : undefined
+}
+
+/**
+ * Once the parked session's turn has ended with its handoff written, the inbox entry goes in and
+ * the person is told they can close the session. Gives up after PARK_GIVE_UP_MS.
+ */
+// A completion under way: the turn's end and the timer never complete one park twice.
+let isCompletingPark = false
+
+async function checkPark($: EngineInterface) {
+  if (isCompletingPark) return
+  isCompletingPark = true
+  try {
+    await completePark($)
+  } finally {
+    isCompletingPark = false
+  }
+}
+
+async function completePark($: EngineInterface) {
+  const park = (await $.state.get(PARK)).value
+  if (!park || isTurnRunning) return
+  const now = await $.clock.now()
+  const text = (await $.fs.exists(park.path)) ? String(await $.fs.read(park.path).catch(() => '')) : undefined
+  if (text === undefined || text === '' || text === park.before) {
+    if (now - park.since < PARK_GIVE_UP_MS) return
+    await $.state.set(PARK, null)
+    $.ui.log(`watchmen: no handoff appeared at ${park.path} within ten minutes, so nothing was parked. Type /watchmen park to try again.`)
+    return
+  }
+  const dir = await stateDir($)
+  if (!dir) return
+  // Cleared before anything else, so this park completes once whatever happens next.
+  await $.state.set(PARK, null)
+  const front = parseFrontMatter(text)
+  const short = shortId(park.sessionId)
+  const isRead = !('error' in front)
+  const lane = (isRead ? front.lane : undefined) ?? park.lane ?? (isRead && front.waitingOn ? 'waiting' : 'todo')
+  const cwd = await $.session.cwd()
+  // A git worktree beside its repository (repo-TICKET next to repo) is covered by a watch over the
+  // repository's folder too: the entry carries the main worktree's root.
+  const repoRoot = await repoRootAt($, cwd)
+  const entry: InboxEntry = {
+    sessionId: park.sessionId,
+    cwd,
+    ...(repoRoot ? { repoRoot } : {}),
+    ...(park.to ? { to: park.to } : {}),
+    handoff: park.path,
+    at: now,
+    title: isRead ? front.title : `Parked session ${short}`,
+    lane,
+    ...(isRead && front.waitingOn ? { waitingOn: front.waitingOn } : {}),
+    ...(isRead && front.link ? { link: front.link } : {}),
+    ...(isRead && front.check ? { check: front.check } : {}),
+    ...(park.note ? { note: park.note } : {}),
+  }
+  // Written beside the inbox name and moved into place, so the watch never reads half an entry
+  // (it lists only *.json).
+  const final = `${dir}/inbox/${short}.json`
+  await $.fs.write(`${final}.tmp`, `${JSON.stringify(entry, null, 2)}\n`)
+  const moved = await $.process.run(['mv', '-f', `${final}.tmp`, final]).catch(error => ({ exitCode: 1, stderr: String(error) }))
+  if (moved.exitCode !== 0) {
+    $.ui.log(`watchmen: the park entry could not be put in the inbox (${moved.stderr.trim() || `mv exited ${moved.exitCode}`}); nothing was parked. Type /watchmen park to try again.`)
+    return
+  }
+  const unread = isRead ? '' : ` (its front matter could not be read: ${front.error}; parked with what it had)`
+  // The same rule the watch takes entries by: the watch it was sent to, else a live watch whose
+  // workspace holds cwd or repoRoot.
+  const live = await liveWorkspaces($, dir, now)
+  const watched = live.some(workspace => covers(workspace, entry))
+  // Pinned to the deepest of nested watches, it is still a watch over its own folder.
+  const isOwnFolder = entry.to !== undefined && covers(entry.to, { cwd: entry.cwd, ...optional('repoRoot', entry.repoRoot) })
+  const home = (await $.env.get('HOME')) || undefined
+  const where = entry.to && !(watched && isOwnFolder)
+    ? watched
+      ? `Parked in the watch in ${shortPath(entry.to, home)} (no watch covers ${shortPath(entry.cwd, home)}). You can close this session.`
+      : `Parked for the watch in ${shortPath(entry.to, home)}, which is not running now: it will pick this up when it starts. You can close this session.`
+    : watched
+      ? 'Parked in watchmen. You can close this session.'
+      : `Parked. No watch covers ${shortPath(entry.cwd, home)} yet: start one in a parent folder (for example ${shortPath(parentOf(entry.repoRoot ?? entry.cwd), home)}) with /watchmen start; it will pick this up. You can close this session.`
+  $.ui.toast(where, { timeoutMs: 10_000 })
+  $.ui.log(`${where}${unread}`)
+}
+
+/**
+ * The watch's heartbeat: parked sessions read it to say whether a watch has them, and take finds
+ * the watch's board by it. `cwd` is the watch's workspace.
+ */
+async function beat($: EngineInterface, now: number, workspace: string) {
+  const dir = await stateDir($)
+  if (!dir) return
+  await $.fs.write(await heartbeatFile(dir, workspace), JSON.stringify({ cwd: workspace, at: now, sessionId: await $.session.id() }))
+}
+
+async function heartbeatFile(dir: string, workspace: string): Promise<string> {
+  return `${dir}/heartbeat/${(await sha256(workspace)).slice(0, 16)}.json`
+}
+
+/**
+ * The watch takes parked sessions for its workspace off the inbox: each becomes (or updates) its
+ * own park-<id> item, its check awaiting approval, and wakes the watch. Entries for other
+ * workspaces are left for their watch; entries that do not validate are moved aside.
+ */
+async function takeInbox($: EngineInterface, now: number, cwd: string) {
+  const dir = await stateDir($)
+  if (!dir) return
+  const inbox = `${dir}/inbox`
+  const names = (await $.fs.list(inbox).catch(() => [])).filter(one => one.kind === 'file' && /^[A-Za-z0-9._-]+\.json$/.test(one.name)).map(one => one.name)
+  const taken: string[] = []
+  // Entries for other workspaces: left alone, but counted when no live watch covers them.
+  const others: InboxEntry[] = []
+  for (const name of names) {
+    const path = `${inbox}/${name}`
+    const entry = parseInboxEntry(String(await $.fs.read(path).catch(() => '')), `${dir}/parked`)
+    if (!entry) {
+      const isMoved = await moveTo($, path, `${inbox}/rejected`, name)
+      if (!rejectedSeen.has(path)) {
+        rejectedSeen.add(path)
+        $.ui.log(`watchmen: a park inbox entry did not validate${isMoved ? ` and was moved to ${inbox}/rejected/${name}` : `; ${path} could not be moved aside`}`)
+      }
+      continue
+    }
+    if (!covers(cwd, entry)) {
+      others.push(entry)
+      continue
+    }
+    // An entry applied before whose move failed is only moved again, never applied twice.
+    const key = `${entry.sessionId}:${entry.at}`
+    if ((await $.state.get(WATCH)).value?.appliedParks?.includes(key)) {
+      await moveTo($, path, `${inbox}/done`, name)
+      continue
+    }
+    const item = parkedItem(entry)
+    // An entry only ever writes its own park- item: the id is derived from its session id.
+    // Marked changed, so the wake's board_changes reports where it came from.
+    const answer = await change(
+      $,
+      items => track(items, item, item.lane).map(one => (one.id === item.id ? { ...one, isChanged: true, last: parkedReport(entry) } : one)),
+      () => 'parked',
+    )
+    if ('deny' in answer) continue
+    await patchWatch($, watch => ({ ...watch, appliedParks: [...(watch.appliedParks ?? []).filter(one => one !== key), key].slice(-100) }))
+    if (!(await moveTo($, path, `${inbox}/done`, name))) $.ui.log(`watchmen: ${path} was taken onto the board but could not be moved to ${inbox}/done/`)
+    taken.push(item.title)
+  }
+  if (taken.length > 0) await patchWatch($, watch => ({ ...watch, wake: queueWake(watch.wake ?? { pending: [] }, taken) }))
+  const waiting = others.length > 0 ? orphans(others, await liveWorkspaces($, dir, now), now) : []
+  const note = orphanLine(waiting, (await $.env.get('HOME')) || undefined)
+  if ((await $.state.get(WATCH)).value?.orphanNote !== note) await patchWatch($, watch => ({ ...watch, orphanNote: note }))
+}
+
+// Rejected inbox entries already reported, so one that cannot be moved aside is reported once.
+const rejectedSeen = new Set<string>()
+
+/** Where take records wait for their watch: a folder of the inbox older watches do not read. */
+const takeInboxOf = (dir: string) => `${dir}/inbox/take`
+
+/**
+ * The watch takes the take records for its workspace: each item taken in another session goes to
+ * moving with a note saying where. Only this watch writes its board; records for other workspaces
+ * are left for their watch, and records that do not validate are moved aside.
+ */
+async function takeTakes($: EngineInterface, workspace: string) {
+  const dir = await stateDir($)
+  if (!dir) return
+  const inbox = takeInboxOf(dir)
+  const names = (await $.fs.list(inbox).catch(() => [])).filter(one => one.kind === 'file' && /^[A-Za-z0-9._-]+\.json$/.test(one.name)).map(one => one.name)
+  for (const name of names) {
+    const path = `${inbox}/${name}`
+    const record = parseTakeRecord(String(await $.fs.read(path).catch(() => '')))
+    if (!record) {
+      const isMoved = await moveTo($, path, `${inbox}/rejected`, name)
+      if (!rejectedSeen.has(path)) {
+        rejectedSeen.add(path)
+        $.ui.log(`watchmen: a take record did not validate${isMoved ? ` and was moved to ${inbox}/rejected/${name}` : `; ${path} could not be moved aside`}`)
+      }
+      continue
+    }
+    if (record.workspace !== workspace) continue
+    // A record applied before whose move failed is only moved again: applying it again would undo
+    // what the watch did with the item since. A done item stays done.
+    const key = `${record.sessionId}:${record.id}:${record.at}`
+    if (!(await $.state.get(WATCH)).value?.appliedTakes?.includes(key)) {
+      const item = (await read($, board)).find(one => one.id === record.id)
+      if (item && item.lane !== 'done') {
+        const { lane, note } = takenMove(record, item)
+        const answer = await change($, items => move(items, record.id, lane, note), () => 'taken')
+        if ('deny' in answer) continue
+      }
+      await patchWatch($, watch => ({ ...watch, appliedTakes: [...(watch.appliedTakes ?? []).filter(one => one !== key), key].slice(-100) }))
+    }
+    await moveTo($, path, `${inbox}/done`, name)
+  }
+}
+
+/**
+ * The resume line of a parked item: only when its note still carries one (the watch keeps it there
+ * while the session waits) and the park's own inbox entry, in inbox/done, names that session; the
+ * folder and session id come from the entry, never from the board.
+ */
+async function parkedResume($: EngineInterface, dir: string, item: Item): Promise<{ cwd: string; sessionId: string; line: string } | undefined> {
+  if (!resumeOf(item)) return undefined
+  const short = item.id.slice('park-'.length)
+  const entry = parseInboxEntry(String(await $.fs.read(`${dir}/inbox/done/${short}.json`).catch(() => '')), `${dir}/parked`)
+  if (!entry || shortId(entry.sessionId) !== short) return undefined
+  return { cwd: entry.cwd, sessionId: entry.sessionId, line: resumeCommand(entry) }
+}
+
+/** Writes a take record into the take inbox, beside its name first and moved into place. */
+async function dropTakeRecord($: EngineInterface, dir: string, record: TakeRecord): Promise<boolean> {
+  const final = `${takeInboxOf(dir)}/${shortId(record.sessionId)}-${(await sha256(record.id)).slice(0, 12)}.json`
+  try {
+    await $.process.run(['mkdir', '-p', takeInboxOf(dir)]).catch(() => undefined)
+    await $.fs.write(`${final}.tmp`, takeRecordText(record))
+    const moved = await $.process.run(['mv', '-f', `${final}.tmp`, final])
+    return moved.exitCode === 0
+  } catch {
+    return false
+  }
+}
+
+/**
+ * /watchmen take [id] in a session that is not the watch. Without an id, the open items of the
+ * watch that covers this folder; with one, that item becomes this session's first message (or,
+ * for a parked session, the line that resumes it), and a take record tells the watch.
+ */
+async function startTake($: EngineInterface, args: string): Promise<string> {
+  const dir = await stateDir($)
+  if (!dir) return 'Cannot take: neither XDG_STATE_HOME nor HOME is set, so no watch can be found.'
+  const home = (await $.env.get('HOME')) || undefined
+  const { id, to, error } = parseTakeArgs(args, home)
+  if (error) return error
+  const now = await $.clock.now()
+  const cwd = await $.session.cwd()
+  const found = await watchFor($, dir, now, { cwd, ...optional('repoRoot', await repoRootAt($, cwd)) }, to)
+  if ('several' in found) return severalWatches('take', found.several, cwd, home)
+  if (found.workspace === undefined) return `No watch is running for ${shortPath(cwd, home)}. Start one with /watchmen start in the folder that holds the work.`
+  // A take record for a watch that is not running would wait with nobody to apply it.
+  if (!found.isLive) return `No watch is running in ${shortPath(found.workspace, home)}. Type /watchmen take without --to to see the one that covers this folder.`
+  const workspace = found.workspace
+  const file = boardFileOf(workspace)
+  if (!(await $.fs.exists(file).catch(() => false))) return `The watch in ${shortPath(workspace, home)} has no board yet.`
+  const parsed = parseBoard(String(await $.fs.read(file).catch(() => '')))
+  if ('error' in parsed) return `The board of the watch in ${shortPath(workspace, home)} could not be read: ${parsed.error}`
+  if (!id) return takeList(parsed.items, workspace, home)
+  const item = openItems(parsed.items).find(one => one.id === id)
+  if (!item) return `No open item "${sanitize(id)}" on the board of the watch in ${shortPath(workspace, home)}. Type /watchmen take to list them.`
+  if (!isTakeable(item)) return `Not taken: ${sanitize(id)} holds hidden characters in its title, kind or note.`
+  const sessionId = await $.session.id()
+  // A parked session is resumed where it was, not redone here: its own session is the one taken.
+  // The line is shown only for a park this machine took in, from its own inbox entry, so a board
+  // item cannot get a crafted folder printed as a command to paste.
+  const resume = await parkedResume($, dir, item)
+  const record: TakeRecord = resume
+    ? { sessionId: resume.sessionId, cwd: resume.cwd, workspace, id: item.id, at: now }
+    : { sessionId, cwd, workspace, id: item.id, at: now }
+  const isMarked = await dropTakeRecord($, dir, record)
+  const marked = isMarked
+    ? ' The watch moves it to moving.'
+    : ' The take record could not be written, so the board does not show it yet.'
+  if (resume) return `${sanitize(item.id)} is a parked session: resume it where it was, with\n  ${resume.line}${marked}`
+  const parked = `${dir}/parked`
+  const names = item.id.startsWith('park-') ? (await $.fs.list(parked).catch(() => [])).filter(one => one.kind === 'file').map(one => one.name) : []
+  const handoff = handoffOf(item, parked, names)
+  const text = takePrompt(item, handoff)
+  // A command.run hook cannot submit a prompt: a timer sends it once the command has answered.
+  // The person typed /watchmen take, so it goes in as their words; the item inside stays quoted.
+  $.clock.after(0, () => {
+    void $.prompt.submit({ text, asUser: true }).catch(error => $.ui.log(`watchmen: the take request was not sent: ${String(error)}`))
+  })
+  return `Taking ${sanitize(item.id)} from the watch in ${shortPath(workspace, home)}.${marked}`
+}
+
+/** Moves an inbox entry into a folder of the inbox; whether it moved. */
+async function moveTo($: EngineInterface, from: string, folder: string, name: string): Promise<boolean> {
+  await $.process.run(['mkdir', '-p', folder]).catch(() => undefined)
+  const moved = await $.process.run(['mv', '-f', from, `${folder}/${name}`]).catch(() => undefined)
+  return moved?.exitCode === 0
+}
+
+/** The briefing for /watchmen start: the launcher's, built here from the plugin's own persona. */
+async function startBriefing($: EngineInterface, watch: Watch): Promise<string> {
+  const persona = await $.fs.read(`${$.plugin.root}/prompts/persona.md`).catch(() => '')
+  const taskModel = pickModel((await $.env.get('WATCHMEN_TASK_MODEL')) || undefined, 'opus')
+  return briefing({ persona: String(persona), skill: watch.skill, handoff: watch.handoff, taskModel, workspace: watch.workspace })
+}
+
+/**
+ * Makes this session the watch, from /watchmen start or the footer button: the person asked for it
+ * either way. Answers what to tell them.
+ */
+async function startHere($: EngineInterface): Promise<string> {
+  let started: Watch
+  try {
+    started = await startWatch($, await findSkill($), true)
+  } catch (error) {
+    return `The watch could not start: ${String(error)}. Type /watchmen start to try again.`
+  }
+  // Less board, more conversation: on the desktop app the pane starts as a small widget; on any
+  // other surface (a terminal, VS Code, a phone) it is not opened at all: the band shows the
+  // counts, /watchmen opens it, and the fullscreen layout still docks it by itself.
+  const surfaces: readonly string[] = await $.session.surfaces().catch(() => [])
+  if (surfaces.includes('desktop')) {
+    await $.ui.open({ id: PANE, title: PANE_TITLE, placement: 'widget' }).catch(() => undefined)
+  }
+  // The briefing is the watch's first message. A command.run hook cannot submit a prompt (it
+  // would wait on the turn the hook holds), so a timer sends it once the command has answered;
+  // the engine starts that turn when the session is idle, the board tools registered above in it.
+  // The person typed /watchmen start or pressed the button, so the model reads the briefing as
+  // their own words. Discovery runs in that timer after it, and what it finds goes in as the
+  // plugin's own message, never as the person's words: its titles come from other people.
+  const text = await startBriefing($, started)
+  $.clock.after(0, async () => {
+    // The morning brief waits for this one; a failed briefing does not hold it back for good.
+    void $.prompt
+      .submit({ text, asUser: true })
+      .catch(error => $.ui.log(`watchmen: the briefing was not sent: ${String(error)}`))
+      .finally(() => patchWatch($, held => ({ ...held, isBriefingPending: undefined })))
+    const found = await discover($).catch(() => undefined)
+    if (found) void $.prompt.submit({ text: found }).catch(error => $.ui.log(`watchmen: what discovery found was not sent: ${String(error)}`))
+  })
+  return 'This session keeps the watch now. The briefing goes in as the first message.'
+}
+
+/**
+ * The footer button outside the watch: start the watch here, unless a live watch already covers
+ * this folder (the rule park and take go by), which then keeps it, and take is the way in.
+ */
+// A start from the button under way: a second press while it runs starts nothing.
+let isButtonStarting = false
+
+async function startFromButton($: EngineInterface): Promise<void> {
+  if (await isWatch($)) return showBoard($)
+  if (isButtonStarting) return
+  isButtonStarting = true
+  try {
+    await startFromButtonOnce($)
+  } finally {
+    isButtonStarting = false
+  }
+}
+
+async function startFromButtonOnce($: EngineInterface): Promise<void> {
+  const dir = await stateDir($)
+  if (dir) {
+    const cwd = await $.session.cwd()
+    const live = [...new Set(await liveWorkspaces($, dir, await $.clock.now()))]
+    const covering = coveringOf(live, { cwd, ...optional('repoRoot', await repoRootAt($, cwd)) })
+    if (covering !== undefined) {
+      const home = (await $.env.get('HOME')) || undefined
+      $.ui.toast(`The watch in ${shortPath(covering, home)} already covers this folder. Type /watchmen take to work on one of its items here.`, { timeoutMs: 10_000 })
+      return
+    }
+  }
+  const answer = await startHere($)
+  if (!(await isWatch($))) $.ui.toast(answer, { timeoutMs: 10_000 })
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const result = await next(e)
-
     // The flag is read once and kept in the session's state, then cleared from the environment so
     // a claude started from this session's shell is not taken for the watch. A hot reload runs
     // session.start again and finds the watch, and the board, in state.
-    let watch = (await $.state.get(WATCH)).value
-    if (!watch) {
-      if ((await $.env.get('WATCHMEN')) !== '1') return result
-      const entries = (await $.fs.exists(HANDOFF_DIR)) ? await $.fs.list(HANDOFF_DIR) : []
-      const latest = newestHandoff(entries.filter(one => one.kind === 'file').map(one => one.name))
-      const boardError = await loadBoard($)
-      watch = {
-        handoff: latest && `${HANDOFF_DIR}/${latest}`,
-        skill: (await $.env.get('WATCHMEN_SKILL')) || undefined,
-        ...(await herdrOf($)),
-        startedAt: await $.clock.now(),
-        warned: false,
-        ...(boardError ? { boardError } : {}),
-      } satisfies Watch
-      await $.state.set(WATCH, watch)
+    // A process restart (an update, a crash) empties the state: a resumed session that kept the
+    // watch finds it again in the store, unless another session has taken its workspace since.
+    const isLaunched = (await $.env.get('WATCHMEN')) === '1'
+    let restored: string | undefined
+    if (!(await isWatch($)) && !isLaunched) {
+      restored = await rememberedWatch($)
+      if (restored !== undefined && (await otherWatchOf($, restored))) {
+        await forgetWatch($).catch(() => undefined)
+        restored = undefined
+      }
+      if (restored === undefined) {
+        await $.command.register(COMMAND_IDLE)
+        return result
+      }
+    }
+    const isNew = !(await isWatch($)) && restored === undefined
+    const skill = restored === undefined ? (await $.env.get('WATCHMEN_SKILL')) || undefined : await findSkill($)
+    await startWatch($, skill, false, restored)
+    // The launcher's briefing is a system prompt built in bash; what discovery finds goes in as a
+    // message of its own, once the session is up. A resumed watch has had both already.
+    if (isNew) {
+      $.clock.after(0, async () => {
+        const found = await discover($).catch(() => undefined)
+        if (found) void $.prompt.submit({ text: found }).catch(error => $.ui.log(`watchmen: what discovery found was not sent: ${String(error)}`))
+      })
     }
     await $.env.set('WATCHMEN', undefined)
     await $.env.set('WATCHMEN_SKILL', undefined)
-
-    await $.command.register({
-      name: 'watchmen',
-      description: 'The watch: open the board, or track <title> | brief | band | approve <id> <hash> | reload | reset',
-      argumentHint: '[track <title> | brief | band | approve <id> <hash> | reload | reset]',
-    })
-    await $.tool.register({
-      name: 'board_track',
-      description:
-        'Add an item to the watch board, or update the one with the same id. Items are anything worth keeping an eye on (a ticket, an MR, another session, a todo); give one a check command and the watch re-runs it and flags the item when its output changes.',
-      inputSchema: { type: 'object', properties: ITEM_PROPERTIES },
-      isDeferred: false,
-    })
-    await $.tool.register({
-      name: 'board_move',
-      description: 'Move a board item to another lane and/or set its one-line note. Clears its changed flag: use it to triage.',
-      inputSchema: {
-        type: 'object',
-        properties: { id: ITEM_PROPERTIES.id, lane: ITEM_PROPERTIES.lane, note: ITEM_PROPERTIES.note },
-        required: ['id'],
-      },
-      isDeferred: false,
-    })
-    await $.tool.register({
-      name: 'board_drop',
-      description: 'Remove an item from the watch board.',
-      inputSchema: { type: 'object', properties: { id: ITEM_PROPERTIES.id }, required: ['id'] },
-      isDeferred: false,
-    })
-    await $.tool.register({
-      name: 'board_changes',
-      description:
-        'List the board items whose check output changed since the last triage, with what the check says now. Triage each with board_move.',
-      inputSchema: { type: 'object', properties: {} },
-      isDeferred: false,
-    })
-
-    // Versions before 0.3 pinned a status line; a reload would leave it on screen, drawn as a warning.
-    $.ui.status(undefined)
-    await tick($)
-    $.clock.every(TICK_MS, () => void tick($))
-
     return result
+  })
+
+  // The person typing in the watch: what they see now is recorded, and, back after an hour or
+  // more, the band says what happened since they last looked, until they type again. Prompts the
+  // plugin or the model submit are not the person looking. No model call.
+  on('prompt.submit', async ($, e, next) => {
+    const kind = e.origin?.kind
+    if ((kind === 'composer' || kind === 'bridge' || kind === 'sdk') && (await isWatch($))) {
+      const now = await $.clock.now()
+      const items = await read($, board)
+      await patchWatch($, held => ({ ...held, sinceNote: sinceYouLooked(held.looked, items, now), looked: { at: now, lanes: lanesOf(items) } }))
+    }
+    return next(e)
   })
 
   on('turn.start', ($, e, next) => {
@@ -545,6 +1473,7 @@ export const register: Register = on => {
   on('turn.complete', async ($, e, next) => {
     if (e.agentId === undefined) {
       isTurnRunning = false
+      void checkPark($).catch(error => $.ui.log(`watchmen: park failed: ${String(error)}`))
       if ((await $.state.get(WATCH)).value) {
         const now = await $.clock.now()
         await patchWatch($, held => ({ ...held, lastTurnAt: now }))
@@ -556,6 +1485,10 @@ export const register: Register = on => {
   on('tool.call', { tool: 'mcp__watchmen__board_track' }, async ($, e) => {
     if (!(await isWatch($))) return { deny: NOT_WATCH }
     const patch = patchFrom(e as Record<string, unknown>)
+    // The approval line must show exactly what would run.
+    if (patch.check?.argv.some(hasHidden)) {
+      return { deny: 'A check argument holds control or invisible formatting characters. Write the command in plain characters.' }
+    }
     const before = await read($, board)
     const answer = await change($, items => track(items, patch), items => `Tracked. ${items.length} items on the board.`)
     if ('result' in answer) await pingNeedsYou($, enteredNeedsYou(before, await read($, board)))
@@ -577,22 +1510,65 @@ export const register: Register = on => {
   on('tool.call', { tool: 'mcp__watchmen__board_drop' }, async ($, e) => {
     if (!(await isWatch($))) return { deny: NOT_WATCH }
     const id = String((e as Record<string, unknown>).id)
-    return change($, items => drop(items, id), items => `Dropped. ${items.length} items left.`)
+    const item = (await read($, board)).find(one => one.id === id)
+    const answer = await change($, items => drop(items, id), items => `Dropped. ${items.length} items left.`)
+    if ('result' in answer) await countDismissed($, item)
+    return answer
   })
 
   on('tool.call', { tool: 'mcp__watchmen__board_changes' }, async $ => {
     if (!(await isWatch($))) return { deny: NOT_WATCH }
-    return { result: changeReport(await read($, board)) }
+    const report = changeReport(await read($, board))
+    // Once a kind has been dismissed often enough, the report asks the watch to ask, once.
+    const aboutYou = `${companionOf(await workspaceOf($))}/about-you.md`
+    const line = await changeIgnored($, state => {
+      const asked = dismissedQuestion(state, aboutYou)
+      return asked.line ? { state: asked.state, value: asked.line } : { value: undefined }
+    })
+    const watch = (await $.state.get(WATCH)).value
+    const orphan = watch?.orphanNote && watch.orphanNote !== watch.orphanAnnounced ? watch.orphanNote : undefined
+    if (orphan) await patchWatch($, held => ({ ...held, orphanAnnounced: orphan }))
+    const extra = [line, orphan && `${orphan}: tell the human in one sentence, and that /watchmen start in a folder holding it would take it.`].filter(Boolean)
+    return { result: [report, ...extra].join('\n\n') }
   })
 
   on('command.run', { command: 'watchmen' }, async ($, e) => {
     const watch = (await $.state.get(WATCH)).value
-    if (!watch) return { text: NOT_WATCH }
     const [verb, ...rest] = e.args.trim().split(/\s+/)
+    if (verb === 'start') {
+      if (watch) {
+        await $.ui.open({ id: PANE, title: PANE_TITLE }).catch(() => undefined)
+        return { text: 'This session already keeps the watch.' }
+      }
+      if (!STARTERS.includes(e.origin.kind)) return { text: 'Only you can start the watch: type /watchmen start yourself.' }
+      return { text: await startHere($) }
+    }
+    if (verb === 'park') {
+      if (!STARTERS.includes(e.origin.kind)) return { text: 'Only you can park a session: type /watchmen park yourself.' }
+      if (watch) return { text: 'This session keeps the watch: park the sessions beside it.' }
+      return { text: await startPark($, rest.join(' ')) }
+    }
+    if (verb === 'take') {
+      // Taking sends the item in as the person's own words, so only their typing takes one.
+      if (!STARTERS.includes(e.origin.kind)) return { text: 'Only you can take an item: type /watchmen take yourself.' }
+      if (watch) return { text: 'This session keeps the watch: take items in the sessions beside it.' }
+      return { text: await startTake($, rest.join(' ')) }
+    }
+    if (!watch) return { text: HOW_TO_START }
     if (verb === 'track') {
       const title = rest.join(' ')
       if (!title) return { text: 'Usage: /watchmen track <title>' }
       const answer = await change($, items => track(items, { title, kind: 'todo' }, 'needs-you'), () => `Tracked: ${title}`)
+      return { text: 'deny' in answer ? answer.deny : answer.result }
+    }
+    if (verb === 'done') {
+      // Closing an item is the person's call, as taking one is: only their typing moves it.
+      if (!STARTERS.includes(e.origin.kind)) return { text: 'Only you can mark an item done: type /watchmen done yourself.' }
+      const [id, ...words] = rest
+      if (!id) return { text: 'Usage: /watchmen done <id> [note]' }
+      const note = words.length > 0 ? words.join(' ') : undefined
+      if (note !== undefined && hasHidden(note)) return { text: 'The note holds control or invisible formatting characters. Write it in plain characters.' }
+      const answer = await change($, items => move(items, id, 'done', note), () => `Done: ${sanitize(id)}`)
       return { text: 'deny' in answer ? answer.deny : answer.result }
     }
     if (verb === 'approve') {
@@ -600,6 +1576,27 @@ export const register: Register = on => {
       // /watchmen approve is refused, so a planted or injected check cannot approve itself.
       if (e.origin.kind !== 'composer' && e.origin.kind !== 'bridge') {
         return { text: 'Only you can approve a check: type /watchmen approve <id> <hash> yourself.' }
+      }
+      // approve all, in two steps: `approve all` lists every waiting check and one hash over that
+      // exact set; `approve all <hash>` approves the set only while it is still the one listed, so
+      // nothing the person did not read is approved.
+      if (rest[0] === 'all' && rest.length <= 2) {
+        const pending = await pendingChecks($)
+        if (pending.length === 0) return { text: 'No check is waiting for approval.' }
+        const hash = await setHash($, pending)
+        const listed = pending.map(one => `  ${sanitize(one.id)}: ${sanitize(JSON.stringify(one.argv))}`)
+        if (rest[1] === undefined) {
+          return { text: [`Waiting for approval (${pending.length}):`, ...listed, `To approve exactly these, type /watchmen approve all ${hash}`].join('\n') }
+        }
+        if (rest[1] !== hash) {
+          return { text: ['Not approved: the checks waiting changed since that list. Now waiting:', ...listed, `To approve exactly these, type /watchmen approve all ${hash}`].join('\n') }
+        }
+        for (const one of pending) {
+          await $.store.set(await approvalKey($, one.argv), true)
+          await setAwaiting($, one.id, undefined)
+        }
+        await save($)
+        return { text: [`Approved for this workspace (${pending.length}):`, ...listed].join('\n') }
       }
       const item = (await read($, board)).find(one => one.id === rest[0])
       if (!item?.check) return { text: `No item "${rest[0] ?? ''}" with a check on the board.` }
@@ -616,11 +1613,12 @@ export const register: Register = on => {
       return { text: `Approved for this workspace: ${JSON.stringify(item.check.argv)}` }
     }
     if (verb === 'band') {
-      await patchWatch($, held => ({ ...held, isBandHidden: false }))
-      return { text: 'The band is back above the prompt.' }
+      const isHidden = !watch.isBandHidden
+      await patchWatch($, held => ({ ...held, isBandHidden: isHidden }))
+      return { text: isHidden ? 'The band is hidden. /watchmen band brings it back.' : 'The band is back above the prompt.' }
     }
     if (verb === 'reload' || verb === 'reset') {
-      const boardError = verb === 'reload' ? await loadBoard($) : undefined
+      const boardError = verb === 'reload' ? await loadBoard($, await workspaceOf($)) : undefined
       const { boardError: _, ...rest } = watch
       await $.state.set(WATCH, boardError ? { ...rest, boardError } : rest)
       if (boardError) return { text: `board.json still cannot be read: ${boardError}` }
@@ -629,7 +1627,7 @@ export const register: Register = on => {
     }
     const items = await read($, board)
     if (verb === 'brief') return { text: summary(items) }
-    await $.ui.open({ id: PANE, title: PANE_TITLE }).catch(() => undefined)
+    await $.ui.open({ id: PANE, title: PANE_TITLE, focus: true, closeOnEscape: true }).catch(() => undefined)
     const { context } = await $.session.usage()
     const lines = [
       ...(watch.boardError ? [`⚠ board.json could not be read (${watch.boardError}); not saving until /watchmen reload or reset.`, ''] : []),
@@ -642,11 +1640,45 @@ export const register: Register = on => {
     return { text: lines.join('\n') }
   })
 
-  // The board opens by itself only where it docks beside the transcript (the fullscreen layout);
-  // on the main screen it would push the conversation around, so there it waits for /watchmen.
-  // The band: one slim row above the prompt in the watch session, the mascot and the lane counts,
-  // with board and hide. It also opens the board pane by itself where it docks beside the transcript
-  // (the fullscreen layout); on the main screen the pane waits for /watchmen.
+  // The footer button. In the watch it is the way into the board, with a red count when
+  // something needs the person; in any other session it starts the watch there, as /watchmen start.
+  on('ui.render', { component: 'SessionMode' }, async ($, e, next) => {
+    const { Box, Button, Text } = $.ui.resolve(e)
+    const modes = await next(e)
+    if (!(await isWatch($))) {
+      return (
+        <Box gap={1}>
+          {modes}
+          <Button key="watchmen-start" label="start watchmen" plain onPress={() => void startFromButton($).catch(error => $.ui.log(`watchmen: the watch did not start: ${String(error)}`))}>
+            <Text color={BLUE} dimColor>
+              {'⚛ watchmen · start'}
+            </Text>
+          </Button>
+        </Box>
+      )
+    }
+    const needs = (await read($, board)).filter(one => one.lane === 'needs-you').length
+    return (
+      <Box gap={1}>
+        {modes}
+        <Button key="watchmen-open" label="watchmen" plain onPress={() => void showBoard($)}>
+          <Text color={BLUE} bold>
+            {'⚛ watchmen'}
+          </Text>
+          {needs > 0 && (
+            <Text color={RED} bold>
+              {` · ${needs}`}
+            </Text>
+          )}
+        </Button>
+      </Box>
+    )
+  })
+
+  // The band: one slim row above the prompt in the watch session, a glance and nothing to press:
+  // the mascot, the lane counts, what happened since the person last looked, the watch's figures.
+  // The footer button and /watchmen open the board. The pane opens by itself only where it docks
+  // beside the transcript (the fullscreen layout); on the main screen it waits to be asked.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const watch = (await $.state.get(WATCH)).value
     if (!watch) return next(e)
@@ -657,9 +1689,11 @@ export const register: Register = on => {
     if (watch.isBandHidden || e.props.hasSurvey) return next(e)
     const items = await read($, board)
     const shown = await read($, vitalsAtom)
-    const { parts, hasButtons } = bandLayout(items, e.props.bodyColumns, vitals(shown.percent, shown.idleMs, HANDOFF_AT))
+    const since = watch.sinceNote ? [{ text: watch.sinceNote, color: MASCOT_COLORS.changed }] : []
+    const orphan = watch.orphanNote ? [{ text: watch.orphanNote, dim: true }] : []
+    const { parts } = bandLayout(items, e.props.bodyColumns, [...since, ...orphan, ...vitals(shown.percent, shown.idleMs, HANDOFF_AT)])
     const elements = $.ui.resolve(e)
-    const { Box, Text, Button } = elements
+    const { Box, Text } = elements
     const state = mascotState(items)
     // Remote surfaces draw the SVG atom; a terminal has no Svg, so there the mascot is the glyph.
     const Svg = 'Svg' in elements ? elements.Svg : undefined
@@ -675,51 +1709,174 @@ export const register: Register = on => {
             </Text>
           ),
         )}
-        {hasButtons && (
-          <Box key="actions" flexDirection="row">
-            <Text>  </Text>
-            <Button key="board" label="board" onPress={() => void showBoard($, items)} />
-            <Text> </Text>
-            <Button key="hide" label="hide" onPress={() => patchWatch($, held => ({ ...held, isBandHidden: true }))} />
-          </Box>
-        )}
       </Box>
     )
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const { Box, Text } = $.ui.resolve(e)
+    const elements = $.ui.resolve(e)
+    const { Box, Text, Button } = elements
     const items = await read($, board)
     const width = Math.max(10, e.props.bodyColumns)
-    const fit = (text: string) => (text.length > width ? `${text.slice(0, width - 1)}…` : text)
-    if (items.length === 0) {
+    const fit = (text: string, room = width) => (room <= 1 ? '…' : text.length > room ? `${text.slice(0, room - 1)}…` : text)
+    // Minimized on the desktop app: a glance, the mascot and the counts, then what needs you first.
+    if (e.props.placement === 'widget') {
+      const state = mascotState(items)
+      const seen = glance(items)
+      const Svg = 'Svg' in elements ? elements.Svg : undefined
+      const atom = Svg ? await atomSvg($, state) : undefined
       return (
         <Box flexDirection="column">
-          <Text dimColor>The board is empty.</Text>
-          <Text dimColor>{fit('Ask the watch to track something, or /watchmen track <title>.')}</Text>
+          <Box flexDirection="row">
+            {Svg && atom ? (
+              <Svg key="mascot" source={atom} alt="⚛" width={16} height={16} />
+            ) : (
+              <Text key="mascot" color={MASCOT_COLORS[state]} bold={state === 'needs-you'}>⚛</Text>
+            )}
+            <Text key="counts">{fit(` ${seen.counts}`)}</Text>
+          </Box>
+          <Text key="first" color={seen.isNeedsYou ? MASCOT_COLORS['needs-you'] : undefined} dimColor={!seen.isNeedsYou}>
+            {fit(seen.first)}
+          </Text>
         </Box>
       )
     }
+    const watch = (await $.state.get(WATCH)).value
+    const hasArt = width >= ART_WIDTH + 24
+    const header = (
+      <Box key="header" flexDirection="row" marginBottom={1}>
+        {hasArt && (
+          <Box key="art" flexDirection="column" marginRight={2}>
+            {OWL.map((line, at) => (
+              <Text key={`art:${at}`} color={BLUE}>
+                {line}
+              </Text>
+            ))}
+          </Box>
+        )}
+        <Box key="brand" flexDirection="column">
+          <Text key="name" bold color={BLUE}>
+            watchmen
+          </Text>
+          {TAGLINE.map((line, at) => (
+            <Text key={`tag:${at}`} dimColor>
+              {fit(line, width - (hasArt ? ART_WIDTH + 2 : 0))}
+            </Text>
+          ))}
+          <Box key="actions" flexDirection="row" marginTop={1}>
+            <Button key="brief" label="brief" onPress={() => fill($, BRIEF_ASK)} />
+            <Text key="actions:sep1"> </Text>
+            <Button key="watch" label="+ watch" onPress={() => fill($, WATCH_ASK)} />
+            <Text key="actions:sep2"> </Text>
+            <Button key="check" label="↻" plain onPress={() => void checkNow($)} />
+          </Box>
+        </Box>
+      </Box>
+    )
+    const trouble = [
+      ...(watch?.boardError
+        ? [
+            <Text key="board-error" color={RED}>
+              {fit(`⚠ board.json could not be read; not saving until /watchmen reload or reset.`)}
+            </Text>,
+          ]
+        : []),
+      ...(watch?.orphanNote
+        ? [
+            <Text key="orphans" dimColor>
+              {fit(watch.orphanNote)}
+            </Text>,
+          ]
+        : []),
+    ]
+
+    if (items.length === 0) {
+      return (
+        <Box flexDirection="column">
+          {header}
+          {trouble}
+          <Text key="empty" dimColor>
+            {fit('Nothing watched yet. Tell me what to keep an eye on.')}
+          </Text>
+          <Box key="empty-actions" flexDirection="row" marginTop={1}>
+            <Button key="empty-watch" label="+ watch" onPress={() => fill($, WATCH_ASK)} />
+          </Box>
+        </Box>
+      )
+    }
+
+    const LANE_COLOR = (lane: (typeof LANES)[number], count: number) =>
+      lane === 'needs-you' ? (count > 0 ? RED : undefined) : lane === 'moving' ? BLUE : undefined
+    const row = (one: Item, isDim: boolean) => {
+      const mark = one.isChanged ? '◆ ' : '  '
+      const tag = one.kind ? `${sanitize(one.kind)} ` : ''
+      const note = one.note ? sanitize(one.note) : ''
+      const lead = 2 + mark.length + tag.length
+      const titleRoom = Math.max(4, width - lead)
+      const title = fit(sanitize(one.title), titleRoom)
+      const isNoteInline = note !== '' && lead + title.length + 3 + note.length <= width
+      return [
+        <Box key={one.id} flexDirection="row">
+          <Text key="mark" color={AMBER} bold>
+            {`  ${mark}`}
+          </Text>
+          {tag && (
+            <Text key="tag" dimColor>
+              {tag}
+            </Text>
+          )}
+          <Button key={`about:${one.id}`} label={title} plain onPress={() => fill($, `about ${one.id}: `)}>
+            <Text bold={one.isChanged} dimColor={isDim}>
+              {title}
+            </Text>
+          </Button>
+          {isNoteInline && (
+            <Text key="note" dimColor>
+              {` — ${note}`}
+            </Text>
+          )}
+        </Box>,
+        ...(note && !isNoteInline
+          ? [
+              <Text key={`${one.id}:note`} dimColor>
+                {fit(`      ${note}`)}
+              </Text>,
+            ]
+          : []),
+        ...(one.checkError && !one.isAwaitingApproval
+          ? [
+              <Text key={`${one.id}:error`} color="yellow">
+                {fit(`      ⚠ check failed: ${sanitize(one.checkError)}`)}
+              </Text>,
+            ]
+          : []),
+        ...approvalLines(one).map((text, at) => (
+          <Text key={`${one.id}:approval:${at}`} color="yellow">
+            {fit(`      ${text}`)}
+          </Text>
+        )),
+      ]
+    }
+
     return (
       <Box flexDirection="column">
+        {header}
+        {trouble}
         {LANES.filter(lane => lane !== 'done' || items.some(one => one.lane === 'done')).map(lane => {
           const inLane = items.filter(one => one.lane === lane)
+          const isFolded = lane === 'done' && inLane.length > DONE_SHOWN
+          const isDimLane = lane === 'waiting' || lane === 'done'
           return (
             <Box key={lane} flexDirection="column" marginBottom={1}>
-              <Text bold color={lane === 'needs-you' && inLane.length > 0 ? 'yellow' : undefined}>
+              <Text key="title" bold color={LANE_COLOR(lane, inLane.length)} dimColor={isDimLane || (lane === 'needs-you' && inLane.length === 0)}>
                 {`${LANE_TITLES[lane]} (${inLane.length})`}
               </Text>
-              {inLane.length === 0 && <Text dimColor>  —</Text>}
-              {inLane.flatMap(one => [
-                <Text key={one.id} bold={one.isChanged} dimColor={lane === 'done'}>
-                  {fit(`  ${itemLine(one)}`)}
-                </Text>,
-                ...approvalLines(one).map((text, at) => (
-                  <Text key={`${one.id}-approval-${at}`} color="yellow">
-                    {fit(`    ${text}`)}
-                  </Text>
-                )),
-              ])}
+              {inLane.length === 0 && (
+                <Text key="none" dimColor>
+                  {'    —'}
+                </Text>
+              )}
+              {!isFolded && inLane.flatMap(one => row(one, lane === 'done'))}
             </Box>
           )
         })}

@@ -1,0 +1,5 @@
+interface:
+  display_name: "Ambient companion"
+  short_description: "Flow: a day-long session that watches your work's event streams and brings you only the decisions"
+policy:
+  allow_implicit_invocation: false
