@@ -32,7 +32,7 @@ import {
   isSafeHerdrArg,
   vitals,
   isRotationDue,
-  ROTATE_PROMPT,
+  rotatePrompt,
   resumePrompt,
   summary,
   glance,
@@ -68,6 +68,8 @@ import {
 import type { Found } from './discover'
 import {
   covers,
+  coveringOf,
+  isAbsolutePath,
   orphanLine,
   orphans,
   parentOf,
@@ -84,6 +86,8 @@ import {
   stateDirOf,
 } from './park'
 import type { InboxEntry } from './park'
+import { handoffOf, isTakeable, openItems, parseTakeArgs, parseTakeRecord, resumeOf, takeList, takenMove, takePrompt, takeRecordText } from './take'
+import type { TakeRecord } from './take'
 
 // Watchmen keeps the watch in one session: the one the launcher starts (WATCHMEN=1, the briefing
 // as --append-system-prompt), or one where the person types /watchmen start (the desktop app can
@@ -94,8 +98,10 @@ import type { InboxEntry } from './park'
 
 const HANDOFF_DIR = '.companion'
 const HANDOFF_PREFIX = 'handoff-'
-const BOARD_FILE = `${HANDOFF_DIR}/board.json`
-const BOARD_TEMP = `${BOARD_FILE}.tmp`
+// Every .companion path is the workspace's, fixed when the watch starts: a watch whose shell cds
+// into a subfolder (a git worktree below the workspace) still writes the one board.
+const companionOf = (workspace: string) => `${workspace.replace(/\/+$/, '')}/${HANDOFF_DIR}`
+const boardFileOf = (workspace: string) => `${companionOf(workspace)}/board.json`
 const TICK_MS = 15_000
 // Three ticks: the sidebar token outlives one missed refresh, not a watch that has ended.
 const SIDEBAR_TTL_MS = 45_000
@@ -106,8 +112,8 @@ const NOT_WATCH = 'Watchmen is not keeping the watch in this session.'
 const HOW_TO_START = `${NOT_WATCH} Type /watchmen start to make this session the watch.`
 const COMMAND_IDLE = {
   name: 'watchmen',
-  description: 'Start the watch in this session (start), or hand this session to the watch (park)',
-  argumentHint: 'start | park [waiting|todo] [note]',
+  description: 'Start the watch in this session (start), hand this session to the watch (park), or take an item off its board (take)',
+  argumentHint: 'start | park [waiting|todo] [note] [--to <workspace>] | take [id] [--to <workspace>]',
 }
 const COMMAND_WATCH = {
   name: 'watchmen',
@@ -203,9 +209,17 @@ const AMBER = MASCOT_COLORS.changed
 /** Done items listed one by one up to this many; more fold into a count. */
 const DONE_SHOWN = 3
 
+/**
+ * The watch's workspace: the folder it started in, kept in its state. A watch started by an older
+ * version has none; until startWatch records one, the session's folder stands in.
+ */
+async function workspaceOf($: EngineInterface): Promise<string> {
+  return (await $.state.get(WATCH)).value?.workspace ?? (await $.session.cwd())
+}
+
 // What the person dismissed unattended, by kind, kept per workspace across sessions.
 async function ignoredKey($: EngineInterface): Promise<string> {
-  return `ignored:${await sha256(await $.session.cwd())}`
+  return `ignored:${await sha256(await workspaceOf($))}`
 }
 
 async function readIgnored($: EngineInterface): Promise<Ignored> {
@@ -234,7 +248,7 @@ async function countDismissed($: EngineInterface, item: Item | undefined) {
 }
 
 async function commandHash($: EngineInterface, argv: readonly string[]): Promise<string> {
-  return sha256(JSON.stringify([await $.session.cwd(), argv]))
+  return sha256(JSON.stringify([await workspaceOf($), argv]))
 }
 
 async function approvalKey($: EngineInterface, argv: readonly string[]): Promise<string> {
@@ -264,7 +278,7 @@ async function pendingChecks($: EngineInterface): Promise<{ id: string; argv: st
 
 /** The short hash the person types to approve exactly this set of checks, in this workspace. */
 async function setHash($: EngineInterface, pending: readonly { id: string; argv: readonly string[] }[]): Promise<string> {
-  return (await sha256(JSON.stringify([await $.session.cwd(), pending.map(one => [one.id, one.argv])]))).slice(0, 16)
+  return (await sha256(JSON.stringify([await workspaceOf($), pending.map(one => [one.id, one.argv])]))).slice(0, 16)
 }
 
 // Saves run one after another, each writing the board as it stands when its turn comes, so a slow
@@ -280,9 +294,10 @@ async function writeBoard($: EngineInterface) {
   const watch = (await $.state.get(WATCH)).value
   // A board.json the watch could not read is never written over until the human reloads or resets.
   if (!watch || watch.boardError) return
+  const file = boardFileOf(watch.workspace ?? (await $.session.cwd()))
   try {
-    await $.fs.write(BOARD_TEMP, serialize(await read($, board)))
-    const moved = await $.process.run(['mv', '-f', BOARD_TEMP, BOARD_FILE])
+    await $.fs.write(`${file}.tmp`, serialize(await read($, board)))
+    const moved = await $.process.run(['mv', '-f', `${file}.tmp`, file])
     if (moved.exitCode !== 0) throw new Error(moved.stderr.trim() || `mv exited ${moved.exitCode}`)
   } catch (error) {
     $.ui.log(`watchmen: could not save the board: ${String(error)}`)
@@ -298,18 +313,20 @@ export function newestBackupOf(names: readonly string[]): string | undefined {
     .at(-1)?.name
 }
 
-async function newestBackup($: EngineInterface): Promise<string | undefined> {
-  const entries = (await $.fs.exists(HANDOFF_DIR)) ? await $.fs.list(HANDOFF_DIR) : []
+async function newestBackup($: EngineInterface, workspace: string): Promise<string | undefined> {
+  const dir = companionOf(workspace)
+  const entries = (await $.fs.exists(dir)) ? await $.fs.list(dir) : []
   return newestBackupOf(entries.filter(one => one.kind === 'file').map(one => one.name))
 }
 
 /** Loads board.json. One it cannot read is copied to a timestamped .bak and blocks every save. */
-async function loadBoard($: EngineInterface): Promise<string | undefined> {
-  if (!(await $.fs.exists(BOARD_FILE))) {
+async function loadBoard($: EngineInterface, workspace: string): Promise<string | undefined> {
+  const file = boardFileOf(workspace)
+  if (!(await $.fs.exists(file))) {
     await update($, board, () => [])
     return undefined
   }
-  const text = await $.fs.read(BOARD_FILE)
+  const text = await $.fs.read(file)
   const parsed = parseBoard(text)
   if ('items' in parsed) {
     await update($, board, () => parsed.items)
@@ -317,9 +334,9 @@ async function loadBoard($: EngineInterface): Promise<string | undefined> {
   }
   // The board in memory is left as it is: empty at start, and kept when a reload fails. Each
   // unreadable copy gets a backup of its own, so a later failure never replaces an earlier backup.
-  const backup = `${BOARD_FILE}.${await $.clock.now()}.bak`
-  const newest = await newestBackup($)
-  const isKept = newest !== undefined && (await $.fs.read(`${HANDOFF_DIR}/${newest}`)) === text
+  const backup = `${file}.${await $.clock.now()}.bak`
+  const newest = await newestBackup($, workspace)
+  const isKept = newest !== undefined && (await $.fs.read(`${companionOf(workspace)}/${newest}`)) === text
   if (!isKept && !(await $.fs.exists(backup))) await $.fs.write(backup, text)
   $.ui.toast(
     `board.json could not be read (${parsed.error}). Kept as ${backup}; board.json will not be written over. Fix it and /watchmen reload, or /watchmen reset.`,
@@ -543,11 +560,12 @@ async function pingNeedsYou($: EngineInterface, items: readonly Item[]) {
   }
 }
 
-/** The newest handoff in .companion/, as a path, or undefined. */
-async function latestHandoff($: EngineInterface): Promise<string | undefined> {
-  const entries = (await $.fs.exists(HANDOFF_DIR)) ? await $.fs.list(HANDOFF_DIR) : []
+/** The newest handoff in the workspace's .companion/, as an absolute path, or undefined. */
+async function latestHandoff($: EngineInterface, workspace: string): Promise<string | undefined> {
+  const dir = companionOf(workspace)
+  const entries = (await $.fs.exists(dir)) ? await $.fs.list(dir) : []
   const name = newestHandoff(entries.filter(one => one.kind === 'file').map(one => one.name))
-  return name && /^[A-Za-z0-9._-]+$/.test(name) ? `${HANDOFF_DIR}/${name}` : undefined
+  return name && /^[A-Za-z0-9._-]+$/.test(name) ? `${dir}/${name}` : undefined
 }
 
 /**
@@ -569,10 +587,11 @@ async function maybeRotate($: EngineInterface, now: number, tokens: number | und
     }
     const draft = (await $.prompt.read()).text
     if (!isRotationDue({ now, lastTurnAt: watch.lastTurnAt, tokens, baseTokens: watch.baseTokens, isTurnRunning, draft })) return
-    const before = await latestHandoff($)
+    const workspace = await workspaceOf($)
+    const before = await latestHandoff($, workspace)
     await patchWatch($, held => ({ ...held, rotation: { phase: 'handoff', since: now, before } }))
     try {
-      await $.prompt.submit({ text: ROTATE_PROMPT })
+      await $.prompt.submit({ text: rotatePrompt(companionOf(workspace)) })
     } catch (error) {
       $.ui.log(`watchmen: rotation not started: ${String(error)}`)
       await patchWatch($, held => ({ ...held, rotation: undefined, lastTurnAt: now }))
@@ -584,8 +603,10 @@ async function maybeRotate($: EngineInterface, now: number, tokens: number | und
     await patchWatch($, held => ({ ...held, rotation: undefined }))
     return
   }
-  const handoff = await latestHandoff($)
-  if (!handoff || handoff === rotation.before) {
+  const handoff = await latestHandoff($, await workspaceOf($))
+  // A handoff kept by an older version is relative to the workspace: the same file counts as before.
+  const before = rotation.before && !rotation.before.startsWith('/') ? `${await workspaceOf($)}/${rotation.before}` : rotation.before
+  if (!handoff || handoff === before) {
     $.ui.log('watchmen: no new handoff was written, so the watch did not rotate.')
     await patchWatch($, held => ({ ...held, rotation: undefined }))
     return
@@ -628,8 +649,10 @@ async function tick($: EngineInterface) {
     void runCheck($, item, now).catch(error => $.ui.log(`watchmen: check ${item.id} failed: ${String(error)}`))
   }
   if (watch.herdr) void publishSidebar($, watch.herdr, items)
-  await takeInbox($, now).catch(error => $.ui.log(`watchmen: could not read the park inbox: ${String(error)}`))
-  await beat($, now).catch(() => undefined)
+  const workspace = await workspaceOf($)
+  await takeInbox($, now, workspace).catch(error => $.ui.log(`watchmen: could not read the park inbox: ${String(error)}`))
+  await takeTakes($, workspace).catch(error => $.ui.log(`watchmen: could not read the take inbox: ${String(error)}`))
+  await beat($, now, workspace).catch(() => undefined)
   if (!watch.rotation) await maybeWake($, now)
   if (!watch.rotation) await maybeBrief($, now)
   const { context } = await $.session.usage()
@@ -704,13 +727,22 @@ async function startWatch($: EngineInterface, skill: string | undefined, isBrief
     throw error
   }
   let watch = held
+  // A watch an older version started has no workspace: the folder it is in now becomes it, once.
+  if (watch && !watch.workspace) {
+    const workspace = await $.session.cwd()
+    await patchWatch($, kept => ({ ...kept, workspace: kept.workspace ?? workspace }))
+    watch = (await $.state.get(WATCH)).value ?? { ...watch, workspace }
+  }
   if (!watch) {
-    const boardError = await loadBoard($)
+    // The workspace is fixed here, absolute, and every .companion path is resolved from it.
+    const workspace = await $.session.cwd()
+    const boardError = await loadBoard($, workspace)
     const startedAt = await $.clock.now()
     const briefHour = briefHourOf((await $.env.get('WATCHMEN_BRIEF_HOUR')) || undefined)
     const today = localDay(startedAt)
     watch = {
-      handoff: await latestHandoff($),
+      workspace,
+      handoff: await latestHandoff($, workspace),
       briefHour,
       ...(isBriefingPending ? { isBriefingPending } : {}),
       // Started past the brief hour, the watch's opening brief is today's.
@@ -792,7 +824,7 @@ async function recentClaudeSessions($: EngineInterface): Promise<{ count: number
   try {
     const home = (await $.env.get('HOME')) || undefined
     if (!home) return none
-    const cwd = await $.session.cwd()
+    const cwd = await workspaceOf($)
     const root = `${home}/.claude/projects`
     if (!(await $.fs.exists(root))) return none
     const own = projectDirName(cwd)
@@ -874,12 +906,29 @@ async function startPark($: EngineInterface, args: string): Promise<string> {
   if ((await $.state.get(PARK)).value) return 'This session is already being parked: its handoff is on the way.'
   const dir = await stateDir($)
   if (!dir) return 'Cannot park: neither XDG_STATE_HOME nor HOME is set, so there is nowhere to keep the handoff.'
+  const home = (await $.env.get('HOME')) || undefined
+  const { lane, note, to: asked, error } = parseParkArgs(args, home)
+  if (error) return `Not parked: ${error}.`
   const sessionId = await $.session.id()
   const now = await $.clock.now()
+  // Which watch gets it is settled now, before the session writes anything: the one covering this
+  // folder, the one asked for, or, when none covers it, the only one running. Several running and
+  // none covering, the person picks with --to.
+  const cwd = await $.session.cwd()
+  const found = await watchFor($, dir, now, { cwd, ...optional('repoRoot', await repoRootAt($, cwd)) }, asked)
+  if ('several' in found) return severalWatches('park', found.several, cwd, home)
+  const to = found.workspace !== undefined && found.how !== 'covers' ? found.workspace : undefined
   const path = `${dir}/parked/${localDay(now).day}-${shortId(sessionId)}.md`
   const before = (await $.fs.exists(path)) ? String(await $.fs.read(path).catch(() => '')) : undefined
-  const { lane, note } = parseParkArgs(args)
-  const park: Park = { path, sessionId, since: now, ...(before !== undefined ? { before } : {}), ...(lane ? { lane } : {}), ...(note ? { note } : {}) }
+  const park: Park = {
+    path,
+    sessionId,
+    since: now,
+    ...(before !== undefined ? { before } : {}),
+    ...(lane ? { lane } : {}),
+    ...(note ? { note } : {}),
+    ...(to ? { to } : {}),
+  }
   await $.state.set(PARK, park)
   // A command.run hook cannot submit a prompt: a timer sends it once the command has answered.
   $.clock.after(0, () => {
@@ -892,6 +941,38 @@ async function startPark($: EngineInterface, args: string): Promise<string> {
   return `Parking: this session writes its handoff to ${path}, then it goes to the watch.`
 }
 
+const optional = <K extends string, V>(key: K, value: V | undefined): { [P in K]?: V } => (value === undefined ? {} : ({ [key]: value } as { [P in K]?: V }))
+
+/**
+ * The watch a session outside it talks to: the one asked for with --to; else the deepest live
+ * watch whose workspace covers the session's folder or repository; else, when only one watch is
+ * running, that one. Several running and none covering, or none running, it says so.
+ */
+async function watchFor(
+  $: EngineInterface,
+  dir: string,
+  now: number,
+  place: { cwd: string; repoRoot?: string },
+  to: string | undefined,
+): Promise<{ workspace: string; how: 'to' | 'covers' | 'only'; isLive: boolean } | { several: string[] } | { workspace?: undefined }> {
+  const live = [...new Set(await liveWorkspaces($, dir, now))]
+  if (to !== undefined) return { workspace: to, how: 'to', isLive: live.includes(to) }
+  const covering = coveringOf(live, place)
+  if (covering !== undefined) return { workspace: covering, how: 'covers', isLive: true }
+  if (live.length === 1) return { workspace: live[0]!, how: 'only', isLive: true }
+  if (live.length > 1) return { several: live.sort() }
+  return {}
+}
+
+/** Several watches run and none covers this folder: which ones, and how to pick. */
+function severalWatches(verb: 'park' | 'take', several: readonly string[], cwd: string, home: string | undefined): string {
+  return [
+    `No watch covers ${shortPath(cwd, home)}, and ${several.length} are running:`,
+    ...several.map(one => `  ${shortPath(one, home)}`),
+    `Type /watchmen ${verb === 'park' ? 'park' : 'take [id]'} --to <workspace> with the one you mean.`,
+  ].join('\n')
+}
+
 /** The workspaces of the watches that beat within HEARTBEAT_MS. */
 async function liveWorkspaces($: EngineInterface, dir: string, now: number): Promise<string[]> {
   const live: string[] = []
@@ -899,7 +980,7 @@ async function liveWorkspaces($: EngineInterface, dir: string, now: number): Pro
     if (one.kind !== 'file' || !one.name.endsWith('.json')) continue
     try {
       const beat = JSON.parse(String(await $.fs.read(`${dir}/heartbeat/${one.name}`))) as { cwd?: unknown; at?: unknown }
-      if (typeof beat.cwd === 'string' && beat.cwd.startsWith('/') && typeof beat.at === 'number' && now - beat.at < HEARTBEAT_MS) live.push(beat.cwd)
+      if (isAbsolutePath(beat.cwd) && typeof beat.at === 'number' && now - beat.at < HEARTBEAT_MS) live.push(beat.cwd.replace(/\/+$/, '') || '/')
     } catch {
       // A heartbeat that does not read is no watch.
     }
@@ -957,6 +1038,7 @@ async function completePark($: EngineInterface) {
     sessionId: park.sessionId,
     cwd,
     ...(repoRoot ? { repoRoot } : {}),
+    ...(park.to ? { to: park.to } : {}),
     handoff: park.path,
     at: now,
     title: isRead ? front.title : `Parked session ${short}`,
@@ -976,22 +1058,29 @@ async function completePark($: EngineInterface) {
     return
   }
   const unread = isRead ? '' : ` (its front matter could not be read: ${front.error}; parked with what it had)`
-  // The same rule the watch takes entries by: a live watch whose workspace holds cwd or repoRoot.
+  // The same rule the watch takes entries by: the watch it was sent to, else a live watch whose
+  // workspace holds cwd or repoRoot.
   const watched = (await liveWorkspaces($, dir, now)).some(workspace => covers(workspace, entry))
   const home = (await $.env.get('HOME')) || undefined
-  const where = watched
-    ? 'Parked in watchmen. You can close this session.'
-    : `Parked. No watch covers ${shortPath(entry.cwd, home)} yet: start one in a parent folder (for example ${shortPath(parentOf(entry.repoRoot ?? entry.cwd), home)}) with /watchmen start; it will pick this up. You can close this session.`
+  const where = entry.to
+    ? watched
+      ? `Parked in the watch in ${shortPath(entry.to, home)} (no watch covers ${shortPath(entry.cwd, home)}). You can close this session.`
+      : `Parked for the watch in ${shortPath(entry.to, home)}, which is not running now: it will pick this up when it starts. You can close this session.`
+    : watched
+      ? 'Parked in watchmen. You can close this session.'
+      : `Parked. No watch covers ${shortPath(entry.cwd, home)} yet: start one in a parent folder (for example ${shortPath(parentOf(entry.repoRoot ?? entry.cwd), home)}) with /watchmen start; it will pick this up. You can close this session.`
   $.ui.toast(where, { timeoutMs: 10_000 })
   $.ui.log(`${where}${unread}`)
 }
 
-/** The watch's heartbeat: parked sessions read it to say whether a watch has them. */
-async function beat($: EngineInterface, now: number) {
+/**
+ * The watch's heartbeat: parked sessions read it to say whether a watch has them, and take finds
+ * the watch's board by it. `cwd` is the watch's workspace.
+ */
+async function beat($: EngineInterface, now: number, workspace: string) {
   const dir = await stateDir($)
   if (!dir) return
-  const cwd = await $.session.cwd()
-  await $.fs.write(`${dir}/heartbeat/${(await sha256(cwd)).slice(0, 16)}.json`, JSON.stringify({ cwd, at: now }))
+  await $.fs.write(`${dir}/heartbeat/${(await sha256(workspace)).slice(0, 16)}.json`, JSON.stringify({ cwd: workspace, at: now }))
 }
 
 /**
@@ -999,12 +1088,11 @@ async function beat($: EngineInterface, now: number) {
  * own park-<id> item, its check awaiting approval, and wakes the watch. Entries for other
  * workspaces are left for their watch; entries that do not validate are moved aside.
  */
-async function takeInbox($: EngineInterface, now: number) {
+async function takeInbox($: EngineInterface, now: number, cwd: string) {
   const dir = await stateDir($)
   if (!dir) return
   const inbox = `${dir}/inbox`
   const names = (await $.fs.list(inbox).catch(() => [])).filter(one => one.kind === 'file' && /^[A-Za-z0-9._-]+\.json$/.test(one.name)).map(one => one.name)
-  const cwd = await $.session.cwd()
   const taken: string[] = []
   // Entries for other workspaces: left alone, but counted when no live watch covers them.
   const others: InboxEntry[] = []
@@ -1051,6 +1139,106 @@ async function takeInbox($: EngineInterface, now: number) {
 // Rejected inbox entries already reported, so one that cannot be moved aside is reported once.
 const rejectedSeen = new Set<string>()
 
+/** Where take records wait for their watch: a folder of the inbox older watches do not read. */
+const takeInboxOf = (dir: string) => `${dir}/inbox/take`
+
+/**
+ * The watch takes the take records for its workspace: each item taken in another session goes to
+ * moving with a note saying where. Only this watch writes its board; records for other workspaces
+ * are left for their watch, and records that do not validate are moved aside.
+ */
+async function takeTakes($: EngineInterface, workspace: string) {
+  const dir = await stateDir($)
+  if (!dir) return
+  const inbox = takeInboxOf(dir)
+  const names = (await $.fs.list(inbox).catch(() => [])).filter(one => one.kind === 'file' && /^[A-Za-z0-9._-]+\.json$/.test(one.name)).map(one => one.name)
+  for (const name of names) {
+    const path = `${inbox}/${name}`
+    const record = parseTakeRecord(String(await $.fs.read(path).catch(() => '')))
+    if (!record) {
+      const isMoved = await moveTo($, path, `${inbox}/rejected`, name)
+      if (!rejectedSeen.has(path)) {
+        rejectedSeen.add(path)
+        $.ui.log(`watchmen: a take record did not validate${isMoved ? ` and was moved to ${inbox}/rejected/${name}` : `; ${path} could not be moved aside`}`)
+      }
+      continue
+    }
+    if (record.workspace !== workspace) continue
+    // Applying a record twice gives the same lane and note, so a failed move only repeats it.
+    const item = (await read($, board)).find(one => one.id === record.id)
+    if (item) {
+      const { lane, note } = takenMove(record, item)
+      const answer = await change($, items => move(items, record.id, lane, note), () => 'taken')
+      if ('deny' in answer) continue
+    }
+    await moveTo($, path, `${inbox}/done`, name)
+  }
+}
+
+/** Writes a take record into the take inbox, beside its name first and moved into place. */
+async function dropTakeRecord($: EngineInterface, dir: string, record: TakeRecord): Promise<boolean> {
+  const final = `${takeInboxOf(dir)}/${shortId(record.sessionId)}-${(await sha256(record.id)).slice(0, 12)}.json`
+  try {
+    await $.process.run(['mkdir', '-p', takeInboxOf(dir)]).catch(() => undefined)
+    await $.fs.write(`${final}.tmp`, takeRecordText(record))
+    const moved = await $.process.run(['mv', '-f', `${final}.tmp`, final])
+    return moved.exitCode === 0
+  } catch {
+    return false
+  }
+}
+
+/**
+ * /watchmen take [id] in a session that is not the watch. Without an id, the open items of the
+ * watch that covers this folder; with one, that item becomes this session's first message (or,
+ * for a parked session, the line that resumes it), and a take record tells the watch.
+ */
+async function startTake($: EngineInterface, args: string): Promise<string> {
+  const dir = await stateDir($)
+  if (!dir) return 'Cannot take: neither XDG_STATE_HOME nor HOME is set, so no watch can be found.'
+  const home = (await $.env.get('HOME')) || undefined
+  const { id, to, error } = parseTakeArgs(args, home)
+  if (error) return error
+  const now = await $.clock.now()
+  const cwd = await $.session.cwd()
+  const found = await watchFor($, dir, now, { cwd, ...optional('repoRoot', await repoRootAt($, cwd)) }, to)
+  if ('several' in found) return severalWatches('take', found.several, cwd, home)
+  if (found.workspace === undefined) return `No watch is running for ${shortPath(cwd, home)}. Start one with /watchmen start in the folder that holds the work.`
+  const workspace = found.workspace
+  const file = boardFileOf(workspace)
+  if (!(await $.fs.exists(file).catch(() => false))) return `The watch in ${shortPath(workspace, home)} has no board yet.`
+  const parsed = parseBoard(String(await $.fs.read(file).catch(() => '')))
+  if ('error' in parsed) return `The board of the watch in ${shortPath(workspace, home)} could not be read: ${parsed.error}`
+  const notRunning = found.isLive ? '' : `\n(No watch is running in ${shortPath(workspace, home)} now.)`
+  if (!id) return takeList(parsed.items, workspace, home) + notRunning
+  const item = openItems(parsed.items).find(one => one.id === id)
+  if (!item) return `No open item "${sanitize(id)}" on the board of the watch in ${shortPath(workspace, home)}. Type /watchmen take to list them.`
+  if (!isTakeable(item)) return `Not taken: ${sanitize(id)} holds hidden characters in its title, kind or note.`
+  const sessionId = await $.session.id()
+  // A parked session is resumed where it was, not redone here: its own session is the one taken.
+  const resume = resumeOf(item)
+  const record: TakeRecord = resume
+    ? { sessionId: resume.sessionId, cwd: resume.cwd, workspace, id: item.id, at: now }
+    : { sessionId, cwd, workspace, id: item.id, at: now }
+  const isMarked = await dropTakeRecord($, dir, record)
+  const marked = isMarked
+    ? found.isLive
+      ? ' The watch moves it to moving.'
+      : ' The watch moves it to moving when it starts.'
+    : ' The take record could not be written, so the board does not show it yet.'
+  if (resume) return `${sanitize(item.id)} is a parked session: resume it where it was, with\n  ${resume.line}${marked}`
+  const parked = `${dir}/parked`
+  const names = item.id.startsWith('park-') ? (await $.fs.list(parked).catch(() => [])).filter(one => one.kind === 'file').map(one => one.name) : []
+  const handoff = handoffOf(item, parked, names)
+  const text = takePrompt(item, handoff)
+  // A command.run hook cannot submit a prompt: a timer sends it once the command has answered.
+  // The person typed /watchmen take, so it goes in as their words; the item inside stays quoted.
+  $.clock.after(0, () => {
+    void $.prompt.submit({ text, asUser: true }).catch(error => $.ui.log(`watchmen: the take request was not sent: ${String(error)}`))
+  })
+  return `Taking ${sanitize(item.id)} from the watch in ${shortPath(workspace, home)}.${marked}`
+}
+
 /** Moves an inbox entry into a folder of the inbox; whether it moved. */
 async function moveTo($: EngineInterface, from: string, folder: string, name: string): Promise<boolean> {
   await $.process.run(['mkdir', '-p', folder]).catch(() => undefined)
@@ -1062,7 +1250,7 @@ async function moveTo($: EngineInterface, from: string, folder: string, name: st
 async function startBriefing($: EngineInterface, watch: Watch): Promise<string> {
   const persona = await $.fs.read(`${$.plugin.root}/prompts/persona.md`).catch(() => '')
   const taskModel = pickModel((await $.env.get('WATCHMEN_TASK_MODEL')) || undefined, 'opus')
-  return briefing({ persona: String(persona), skill: watch.skill, handoff: watch.handoff, taskModel })
+  return briefing({ persona: String(persona), skill: watch.skill, handoff: watch.handoff, taskModel, workspace: watch.workspace })
 }
 
 export const register: Register = on => {
@@ -1215,6 +1403,12 @@ export const register: Register = on => {
       if (watch) return { text: 'This session keeps the watch: park the sessions beside it.' }
       return { text: await startPark($, rest.join(' ')) }
     }
+    if (verb === 'take') {
+      // Taking sends the item in as the person's own words, so only their typing takes one.
+      if (e.origin.kind !== 'composer' && e.origin.kind !== 'bridge') return { text: 'Only you can take an item: type /watchmen take yourself.' }
+      if (watch) return { text: 'This session keeps the watch: take items in the sessions beside it.' }
+      return { text: await startTake($, rest.join(' ')) }
+    }
     if (!watch) return { text: HOW_TO_START }
     if (verb === 'track') {
       const title = rest.join(' ')
@@ -1269,7 +1463,7 @@ export const register: Register = on => {
       return { text: isHidden ? 'The band is hidden. /watchmen band brings it back.' : 'The band is back above the prompt.' }
     }
     if (verb === 'reload' || verb === 'reset') {
-      const boardError = verb === 'reload' ? await loadBoard($) : undefined
+      const boardError = verb === 'reload' ? await loadBoard($, await workspaceOf($)) : undefined
       const { boardError: _, ...rest } = watch
       await $.state.set(WATCH, boardError ? { ...rest, boardError } : rest)
       if (boardError) return { text: `board.json still cannot be read: ${boardError}` }

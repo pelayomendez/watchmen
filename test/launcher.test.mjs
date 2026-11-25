@@ -84,3 +84,8 @@ test('the briefing points the watch at the human\'s standing preferences, and th
   assert.match(briefing, /\.companion\/about-you\.md: read it now if it exists/)
   assert.match(briefing, /Never write secrets, credentials or anything about other people/)
 })
+
+test('the briefing fixes the workspace: the folder the launcher ran in, absolute', () => {
+  const { briefing } = launch({})
+  assert.match(briefing, /Your workspace is \/[^\n]*model [^\n]*\. Every \.companion\/ path in these instructions and in your skill means \/[^\n]*\/\.companion\//)
+})

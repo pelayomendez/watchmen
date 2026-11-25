@@ -42,6 +42,18 @@ export function handoffLine(handoff: string | undefined): string {
     : 'There is no handoff in .companion/ yet. Start by asking the human for the work, its sources and the charter, one at a time.'
 }
 
-export function briefing(input: { persona: string; skill?: string; handoff?: string; taskModel: string }): string {
-  return [input.persona.trimEnd(), skillLine(input.skill), taskLine(input.taskModel), aboutYouLine(), handoffLine(input.handoff)].join('\n\n')
+/** Where the watch's files live, fixed at start: the shell may cd, the .companion folder does not move. */
+export function workspaceLine(workspace: string): string {
+  return `Your workspace is ${workspace}. Every .companion/ path in these instructions and in your skill means ${workspace}/.companion/, wherever your shell's working directory goes: write the handoff and about-you.md there, never into a subfolder you cd into.`
+}
+
+export function briefing(input: { persona: string; skill?: string; handoff?: string; taskModel: string; workspace?: string }): string {
+  return [
+    input.persona.trimEnd(),
+    skillLine(input.skill),
+    taskLine(input.taskModel),
+    ...(input.workspace ? [workspaceLine(input.workspace)] : []),
+    aboutYouLine(),
+    handoffLine(input.handoff),
+  ].join('\n\n')
 }

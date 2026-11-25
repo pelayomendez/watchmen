@@ -24,14 +24,30 @@ export function cleanLine(text: string, max: number): string {
 const isHttp = (value: string) => /^https?:\/\/[^\s\p{C}\u2028\u2029]+$/u.test(value) && value.length <= MAX.link
 
 /** Format characters and separators can make a title read as something else: such text is refused. */
-const isSpoofed = (value: string) => /[\p{Cf}\u2028\u2029]/u.test(value)
+export const isSpoofed = (value: string) => /[\p{Cf}\u2028\u2029]/u.test(value)
 
-/** `/watchmen park [waiting|todo] [free note]`: the lane the person asked for, and their note. */
-export function parseParkArgs(args: string): { lane?: ParkLane; note?: string } {
-  const words = args.trim().split(/\s+/).filter(Boolean)
+/**
+ * `--to <workspace>` taken out of a command's words: the workspace as an absolute path (~ is the
+ * home folder, trailing slashes go), the other words, or an error when the path is not one we take.
+ */
+export function takeTo(words: readonly string[], home: string | undefined): { to?: string; rest: string[]; error?: string } {
+  const at = words.indexOf('--to')
+  if (at === -1) return { rest: [...words] }
+  const rest = [...words.slice(0, at), ...words.slice(at + 2)]
+  const raw = words[at + 1]
+  if (raw === undefined) return { rest, error: '--to needs the folder of a running watch' }
+  const expanded = raw === '~' || raw.startsWith('~/') ? (home && home.startsWith('/') ? `${home.replace(/\/+$/, '')}${raw.slice(1)}` : raw) : raw
+  const to = expanded.replace(/\/+$/, '') || '/'
+  if (!isAbsolutePath(to)) return { rest, error: `--to takes an absolute folder, not ${JSON.stringify(sanitize(raw))}` }
+  return { to, rest }
+}
+
+/** `/watchmen park [waiting|todo] [free note] [--to <workspace>]`: the lane, the note, the watch asked for. */
+export function parseParkArgs(args: string, home?: string): { lane?: ParkLane; note?: string; to?: string; error?: string } {
+  const { to, rest: words, error } = takeTo(args.trim().split(/\s+/).filter(Boolean), home)
   const lane = PARK_LANES.find(one => one === words[0])
   const note = cleanLine((lane ? words.slice(1) : words).join(' '), MAX.note)
-  return { ...(lane ? { lane } : {}), ...(note ? { note } : {}) }
+  return { ...(lane ? { lane } : {}), ...(note ? { note } : {}), ...(to ? { to } : {}), ...(error ? { error } : {}) }
 }
 
 /** A session id as a file-name-safe short form, and whether the id is one we accept at all. */
@@ -104,6 +120,8 @@ export type InboxEntry = {
   cwd: string
   /** The repository's main worktree, when the session ran in a git worktree of it (or the repo itself). */
   repoRoot?: string
+  /** The workspace of the watch it was sent to, when no watch covered it: only that watch takes it. */
+  to?: string
   handoff: string
   at: number
   title: string
@@ -131,6 +149,8 @@ export function parseInboxEntry(text: string, parkedDir: string): InboxEntry | u
   if (!isAbsolutePath(cwd)) return undefined
   if (raw.repoRoot !== undefined && !isAbsolutePath(raw.repoRoot)) return undefined
   const repoRoot = raw.repoRoot as string | undefined
+  if (raw.to !== undefined && !isAbsolutePath(raw.to)) return undefined
+  const to = raw.to as string | undefined
   if (typeof handoff !== 'string' || !handoff.startsWith(`${parkedDir}/`) || !/^[A-Za-z0-9._-]+\.md$/.test(handoff.slice(parkedDir.length + 1)) || handoff.includes('..')) return undefined
   if (typeof at !== 'number' || !Number.isFinite(at)) return undefined
   if ([raw.title, raw.note, raw.waitingOn].some(value => typeof value === 'string' && isSpoofed(value))) return undefined
@@ -146,6 +166,7 @@ export function parseInboxEntry(text: string, parkedDir: string): InboxEntry | u
     sessionId,
     cwd,
     ...(repoRoot ? { repoRoot } : {}),
+    ...(to ? { to } : {}),
     handoff,
     at,
     title,
@@ -173,9 +194,18 @@ export function repoRootOf(stdout: string): string | undefined {
   return root === '' ? undefined : root
 }
 
-/** Whether a watch in `workspace` covers a parked session: its folder, or its repository, is inside. */
-export function covers(workspace: string, entry: Pick<InboxEntry, 'cwd' | 'repoRoot'>): boolean {
+/**
+ * Whether a watch in `workspace` covers a parked session: the watch it was sent to with --to, else
+ * any watch its folder, or its repository, is inside.
+ */
+export function covers(workspace: string, entry: Pick<InboxEntry, 'cwd' | 'repoRoot' | 'to'>): boolean {
+  if (entry.to !== undefined) return entry.to === (workspace.replace(/\/+$/, '') || '/')
   return isInside(entry.cwd, workspace) || (entry.repoRoot !== undefined && isInside(entry.repoRoot, workspace))
+}
+
+/** Of the workspaces given, the deepest that covers this place, if any. */
+export function coveringOf(workspaces: readonly string[], place: Pick<InboxEntry, 'cwd' | 'repoRoot' | 'to'>): string | undefined {
+  return workspaces.filter(one => covers(one, place)).sort((a, b) => b.length - a.length)[0]
 }
 
 /** A path with the home folder shown as ~. */
@@ -199,7 +229,7 @@ export function orphans(entries: readonly InboxEntry[], watched: readonly string
 /** "1 parked session waits for a watch in ~/x", or undefined when none waits. */
 export function orphanLine(waiting: readonly InboxEntry[], home: string | undefined): string | undefined {
   if (waiting.length === 0) return undefined
-  const places = [...new Set(waiting.map(entry => shortPath(entry.repoRoot ?? entry.cwd, home)))]
+  const places = [...new Set(waiting.map(entry => shortPath(entry.to ?? entry.repoRoot ?? entry.cwd, home)))]
   const shown = places.slice(0, 2).join(', ') + (places.length > 2 ? ` and ${places.length - 2} more` : '')
   return waiting.length === 1 ? `1 parked session waits for a watch in ${shown}` : `${waiting.length} parked sessions wait for a watch in ${shown}`
 }

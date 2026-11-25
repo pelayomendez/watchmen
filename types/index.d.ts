@@ -1,4 +1,9 @@
 export type Watch = {
+  /**
+   * The folder the watch started in, absolute: its board, handoffs and about-you live in its
+   * .companion/, wherever the session's shell goes later. Missing in state an older version wrote.
+   */
+  workspace?: string
   handoff?: string
   skill?: string
   startedAt: number
@@ -46,6 +51,8 @@ export type Park = {
   before?: string
   lane?: 'waiting' | 'todo'
   note?: string
+  /** The workspace of the watch it goes to when no watch covers it (--to, or the only one running). */
+  to?: string
 }
 
 /** What the band shows of the watch itself: its context fill and how long it has been idle. */

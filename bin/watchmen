@@ -45,6 +45,9 @@ if [ -z "$skill" ]; then
 fi
 
 handoff=$(ls .companion/handoff-*.md 2>/dev/null | sort | tail -1 || true)
+# The workspace is fixed here: the watch's shell may cd later, its .companion folder does not move.
+if [ -n "$handoff" ]; then handoff="$PWD/$handoff"; fi
+workspace_line="Your workspace is $PWD. Every .companion/ path in these instructions and in your skill means $PWD/.companion/, wherever your shell's working directory goes: write the handoff and about-you.md there, never into a subfolder you cd into."
 
 if [ -n "$skill" ]; then
   skill_line="Your process is the ambient-companion skill at $skill. Read it and follow its steps."
@@ -72,6 +75,8 @@ briefing="$(cat "$ROOT/prompts/persona.md")
 $skill_line
 
 $task_line
+
+$workspace_line
 
 $about_line
 
