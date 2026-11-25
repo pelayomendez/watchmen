@@ -3,11 +3,11 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>watchmen · a companion for Claude Code</title>
-  <meta name="description" content="A companion Claude Code session that keeps a board of what you track and brings you only what needs you.">
+  <title>watchmen · your assistant for work, in Claude Code</title>
+  <meta name="description" content="A Claude Code plugin: tell it what to watch (merge requests, review comments, sessions, todos). It keeps the list, checks each item, and tells you only what needs you.">
   <link rel="icon" href="icon.png">
   <meta property="og:title" content="watchmen">
-  <meta property="og:description" content="A companion session that keeps the watch over your work.">
+  <meta property="og:description" content="Tell it what to watch. It tells you what needs you.">
   <meta property="og:url" content="https://pelayomendez.github.io/watchmen/">
   <meta property="og:image" content="https://pelayomendez.github.io/watchmen/og.png">
   <meta property="og:image:width" content="1200">
@@ -20,7 +20,7 @@
     body { margin: 0; background: var(--ink); color: var(--cream); font: 17px/1.6 ui-sans-serif, system-ui, -apple-system, sans-serif; }
     main { max-width: 760px; margin: 0 auto; padding: 56px 24px 80px; }
     header { text-align: center; }
-    header img { width: 168px; height: 168px; }
+    header img { width: 200px; height: 200px; }
     h1 { font-size: 44px; margin: 12px 0 4px; letter-spacing: -0.5px; }
     .tag { color: var(--dim); font-size: 19px; margin: 0 auto; max-width: 560px; }
     h2 { color: var(--accent); font-size: 20px; margin: 44px 0 10px; }
@@ -30,6 +30,7 @@
     table { border-collapse: collapse; width: 100%; }
     td { padding: 8px 10px; border-top: 1px solid #2c2c3c; vertical-align: top; }
     td:first-child { white-space: nowrap; font-weight: 600; }
+    .tiers td { font-size: 15px; width: 29%; } .tiers td:first-child { width: auto; } .tiers tr:first-child td { font-weight: 700; border-top: none; }
     a { color: var(--accent); }
     .cta { text-align: center; margin-top: 28px; }
     .cta a { display: inline-block; margin: 0 6px; padding: 10px 18px; border-radius: 999px; border: 1px solid var(--accent); text-decoration: none; }
@@ -38,46 +39,58 @@
   </style>
 </head>
 <body>
+
 <main>
   <header>
-    <img src="icon.png" alt="">
+    <img src="sticker.png" alt="watchmen mascot">
     <h1>watchmen</h1>
-    <p class="tag">Who watches the watchmen? A companion Claude Code session beside your working ones: it keeps a board of your tickets, merge requests, sessions and todos, and tells you only what needs you.</p>
+    <p class="tag">Tell it what to watch. It tells you what needs you. Your assistant for work, as a Claude Code plugin: it keeps the list of your merge requests, comments, sessions and todos, checks each one, and stays quiet until something needs you.</p>
     <p class="cta"><a class="primary" href="#install">Install</a><a href="https://github.com/pelayomendez/watchmen">GitHub</a></p>
   </header>
 
   <h2>The board</h2>
 <pre>┌─ ⚛ watchmen ──────────────────────────┐
 │ <span class="red">Needs you (2)</span>                          │
-│   ◆ [mr] !123 frames — 2 new comments  │
+│   ◆ [mr] !42 frames — 2 new comments   │
 │   • [todo] Update plan v3              │
 │ <span class="teal">Moving (1)</span>                             │
-│   • [session] ABC-10001 — slice 2/4    │
+│   • [session] ABC-101 — slice 2/4      │
 │ <span class="mute">Waiting (1)</span>                            │
-│   • [jira] ABC-10003 — backend fields  │
+│   • [jira] ABC-103 — backend fields    │
 └────────────────────────────────────────┘</pre>
-  <p>Tell it what to track in plain words. Each item can carry a <b>check</b>, any command on your machine whose output tells its state (<code>gh</code>, <code>glab</code>, <code>acli</code>, <code>git</code>). A check runs only after you approve that exact command. When an output changes, the watch wakes, sorts the item into its lane with a one-line note, and notifies you if it needs you.</p>
+  <p>watchmen is one Claude Code session, the watch, beside your working ones, in a terminal or in the Claude desktop app. Tell it what to keep an eye on in plain words. It keeps the list, checks each item, and comes back to you only when something needs you; the rest it sorts into what is moving and what is waiting. It remembers how you like to hear from it.</p>
 
   <table>
     <tr><td class="red">Needs you</td><td>You must act or decide.</td></tr>
-    <tr><td>Moving</td><td>It advances without you.</td></tr>
+    <tr><td class="accent">Moving</td><td>It advances without you.</td></tr>
     <tr><td class="mute">Waiting</td><td>It waits on someone else.</td></tr>
   </table>
 
+  <h2>A day with it</h2>
+  <table>
+    <tr><td class="accent">Start</td><td><code>/watchmen start</code> in a session in your workspace folder, or the <code>⚛ watchmen · start</code> button in the footer. It reads the last handoff and proposes what to watch from a few read-only lookups: your open pull and merge requests, the reviews asked of you, your tickets in progress. It adds only what you accept, and it survives a restart of Claude Code.</td></tr>
+    <tr><td class="accent">Brief</td><td>Once a day it speaks first: what needs you, then what moved. Back after an hour, the band says <span class="red">since you looked: 1 need you</span> · 3 moved.</td></tr>
+    <tr><td class="accent">Approve</td><td>Each item can carry a check, any command whose output tells its state (<code>gh</code>, <code>glab</code>, <code>acli</code>, <code>git</code>). None runs until you approve that exact command: <code>/watchmen approve all</code>, then the hash it shows, typed in a terminal or through Remote Control (not yet in the desktop app).</td></tr>
+    <tr><td class="accent">Park</td><td><code>/watchmen park</code> in a session whose work waits on someone: it writes a handoff, the watch puts it on the board with the command to resume it, and you close the session.</td></tr>
+    <tr><td class="accent">Take</td><td><code>/watchmen take &lt;id&gt;</code> in any other session: the item arrives as your first message, and the watch marks it as being worked on there.</td></tr>
+  </table>
+
+  <h2>What you see</h2>
+  <p>A <code>⚛ watchmen</code> button in the footer, with a <span class="red">red count</span> when something needs you, opens the board. A slim band above the prompt gives the counts at a glance. On the desktop the board sits as a small widget: the mascot, the lane counts and the first thing that needs you. When an item lands in needs-you you get a notification; everything else stays in its note.</p>
+
   <h2>A charter, not an agent loose on your machine</h2>
-  <p>It runs the <a href="https://github.com/pelayomendez/pelayo-skills">ambient-companion</a> process under a charter of what it may do alone, must ask first, and never does. It never writes product code and never acts in your other sessions: it watches, sorts and asks. It stays on all day on sonnet and hands any task you give it to an opus subagent; before its cache goes cold it writes a handoff and starts small again.</p>
+  <p>It works under a charter of what it may do alone, must ask first, and never does, and is told never to write product code or act in your other sessions: it watches, sorts and asks, and hands real tasks to a subagent. What the plugin enforces: the lookups that propose what to watch are fixed and read-only, what they find reaches the watch as quoted data rather than your words, and no check runs before you approve it. It keeps your preferences in a file you own, and never writes secrets or anything about other people there.</p>
 
   <h2>In herdr</h2>
-  <p>As a <a href="https://herdr.dev">herdr</a> plugin, one key summons the watch beside whatever tab you are on and a second sends it home. Follow mode brings it along as you switch tabs, and the sidebar shows each space's state: <span class="red">⚛ 2 need you</span>, <span class="accent">⚛ 1 changed</span>, <span class="mute">⚛ quiet</span>.</p>
+  <p>As a <a href="https://herdr.dev">herdr</a> plugin, one key summons the watch beside whatever tab you are on and a second sends it home. Follow mode brings it along as you switch tabs, and the sidebar shows each space's state: <span class="red">⚛ 2 need you</span>, <span class="amber">⚛ 1 changed</span>, <span class="mute">⚛ quiet</span>.</p>
 
   <h2 id="install">Install</h2>
-<pre>git clone https://github.com/pelayomendez/watchmen
-npx skills@latest add pelayomendez/pelayo-skills
-ln -s "$PWD/watchmen/bin/watchmen" ~/.local/bin/watchmen
-cd &lt;your workspace&gt; &amp;&amp; watchmen</pre>
-<pre><span class="mute"># in herdr</span>
-herdr plugin install pelayomendez/watchmen --ref v0.2.0</pre>
-  <p>Needs Claude Code 2.1.287 or newer and Node.js 20. Requirements, key bindings and the full board reference in the <a href="https://github.com/pelayomendez/watchmen#readme">README</a>.</p>
+<pre><span class="mute"># in Claude Code</span>
+/plugin marketplace add pelayomendez/watchmen
+/plugin install watchmen@pelayomendez-watchmen
+<span class="mute"># then, in a session in your workspace folder</span>
+/watchmen start</pre>
+  <p>Needs Claude Code 2.1.287 or newer and Node.js 20. A terminal launcher, herdr setup, every command and the safety details are in the <a href="https://github.com/pelayomendez/watchmen#readme">README</a>.</p>
 
   <footer>MIT · by <a href="https://github.com/pelayomendez">Pelayo Méndez</a></footer>
 </main>

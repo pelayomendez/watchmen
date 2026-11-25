@@ -4,15 +4,30 @@ Releases are tagged `watchmen--v<version>` (Claude Code) and `v<version>` (herdr
 
 ## Unreleased
 
-- `/watchmen park [waiting|todo] [note]` hands any session to the watch: the session writes a handoff with a small front matter, the plugin puts it in an inbox under the state folder, and the watch for that folder takes it onto the board as a `session` item with the command to resume it. Its proposed check waits for your approval; everything in it is validated as untrusted.
-- A parked git worktree (`repo-TICKET` beside `repo`) is taken by a watch over its repository too; a park no running watch covers says so, suggests where to start one, and shows as a dim line in every watch until one does.
+Proposed as 0.4.0: hand sessions to the watch and take work back from it.
+
+Park and take
+
+- `/watchmen park [waiting|todo] [note]`, in any session but the watch, hands it to the watch: the session writes a handoff with a small front matter, the plugin drops it in an inbox under the state folder, and the watch that covers the folder takes it onto the board as a `session` item whose note ends with the command to resume it. You close the session. A proposed check waits for your approval like any other.
+- A parked git worktree (`repo-TICKET` beside `repo`) is covered by a watch over its repository. Under nested watches the deepest takes it.
+- Parking from a folder no watch covers goes to the only running watch and says so; with several running, `/watchmen park` lists them and asks for `--to <workspace>`; with none, it suggests where to start one, and the park shows as a dim line in every watch until one covers it.
+- `/watchmen take [id]` is the opposite of park: alone it lists the open items of the watch that covers the folder; with an id it sends that item, quoted, as your first message, naming a parked item's handoff to read first; for a parked item that can still be resumed it sends nothing and prints the resume line instead. The watch moves the item to moving with where it is worked on; the taking session never writes the board.
+
+The watch
+
+- The workspace is fixed when the watch starts: a watch whose shell `cd`s into a subfolder (a git worktree below the workspace) no longer writes a stray `.companion/board.json` there. Handoff paths in its prompts are absolute, and the briefing names the workspace.
+- The watch survives a restart of Claude Code (an update, a crash) and `claude --resume`: it is recorded by session id in the plugin's store, so the resumed session takes its watch, workspace and board up again without a second briefing, unless another session has kept that workspace's watch since.
+- The `⚛ watchmen · start` footer button in every other session starts the watch there, as `/watchmen start` does; when a running watch already covers the folder, a toast names it and suggests `/watchmen take`.
+
+Discovery and safety
+
 - Discovery leaves out pull and merge requests idle for 60 days, and asks each GitLab host in glab's config by name (`glab api --hostname`), so a glab set up for a company host finds its MRs.
-- `/watchmen take [id]` is the opposite of park, in any session but the watch: alone it lists the open items of the watch that covers the folder; with an id it sends that item, quoted, as your first message (a parked item's handoff to read first, or, while its note has one, just its resume line). The watch moves the item to moving with where it is worked on, from a take record in the inbox: the taking session never writes the board.
-- Parking from a folder no watch covers goes to the only running watch, and says so; with several running, `/watchmen park` lists them and asks for `--to <workspace>`. Under nested watches a park is pinned to the deepest, so only one takes it. A watch still on the previous version until it reloads ignores `--to` and takes parks by folder alone.
-- The watch's workspace is fixed when it starts: a watch whose shell `cd`s into a subfolder (a git worktree below the workspace) no longer writes a stray `.companion/board.json` there. Handoff paths in its prompts are absolute, and the briefing names the workspace. A watch started by an older version takes the folder it is in once.
-- A watch survives a restart of Claude Code (an update, a crash) and `claude --resume`: the session's state does not outlive the process, so the watch is also recorded by session id in the plugin's store, and the resumed session takes its watch, workspace and board up again, without a second briefing. A workspace another session has kept the watch of since is left to it. The heartbeat now names the watch's session.
-- The `⚛ watchmen · start` footer button in every session that is not the watch starts it there, as `/watchmen start` does. When a running watch already covers the folder it does not start a second one: a toast names that watch and suggests `/watchmen take`.
-- Park and checks refuse hidden characters (format, bidi and other invisible code points) in commands and parked titles, so an approval line shows exactly what runs.
+- Park and checks refuse hidden characters (format, bidi and other invisible code points) in commands and parked titles, so an approval line shows exactly what runs. Everything a parked session writes is validated as untrusted.
+
+Upgrading
+
+- A watch started by an older version takes the folder it is in as its workspace once, and ignores `--to` until it reloads.
+- The README is rewritten top-down: install, a day with watchmen, commands, safety. The desktop plan moved to `docs/history/`.
 
 ## 0.3.0
 

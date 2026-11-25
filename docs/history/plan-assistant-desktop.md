@@ -1,5 +1,9 @@
 # Plan: watchmen as your assistant, on the desktop
 
+> **Status: done.** Kept as history. Everything below shipped on `feat/desktop-assistant` (0.3.0
+> and the notes after it in the changelog), along with park and take; the README describes the
+> plugin as it is now.
+
 ## Why
 
 watchmen is an assistant for work: you tell it what to watch (an MR, a comment, a session, a todo),
