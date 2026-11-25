@@ -84,15 +84,30 @@ Done for now with a session, but its work waits on someone? Type `/watchmen park
 /watchmen park                      # the session decides: waiting if it waits on something, else a todo
 /watchmen park waiting ask Ana Monday
 /watchmen park todo
+/watchmen park --to ~/dev            # no watch covers this folder: send it to the watch in ~/dev
 ```
 
 1. The session writes a handoff to `${XDG_STATE_HOME:-~/.local/state}/watchmen/parked/<date>-<session>.md`: what is done, what is left, what it waits on and from whom, how to resume. A short front matter on top gives its title, lane, what it waits on, a link, and optionally a check command that tells when the wait is over.
-2. When that turn ends with the file written, the plugin drops an entry in `…/watchmen/inbox/` and says `Parked in watchmen. You can close this session.` when a running watch covers it. Otherwise it says no watch covers that folder yet and suggests a parent folder to run `/watchmen start` in. It gives up after ten minutes without a handoff.
+2. When that turn ends with the file written, the plugin drops an entry in `…/watchmen/inbox/` and says `Parked in watchmen. You can close this session.` when a running watch covers it. When none covers it but exactly one watch is running, the park goes to that one and says so; when several are running, `/watchmen park` lists them and asks you to type `/watchmen park --to <workspace>` before anything is written. With no watch running it says no watch covers that folder yet and suggests a parent folder to run `/watchmen start` in. It gives up after ten minutes without a handoff.
 3. A watch covers a parked session when its folder holds the session's folder, or the session's repository: a git worktree such as `repo-TICKET` beside `repo` is covered by a watch over `repo` or above it (the entry records the repository's main worktree, from `git rev-parse --git-common-dir`). The first covering watch takes the entry onto the board as a `session` item, in waiting or needs-you, its note ending with the command to resume it (`cd <folder> && claude --resume <session id>`), its link the handoff. It tells you in a sentence what was parked. When the check says the wait is over, the item moves to needs-you with the resume command. The watch never starts a session itself.
 
 A parked session no running watch covers, waiting over a minute, shows as a dim line in every watch's band and pane, `1 parked session waits for a watch in ~/dev/repo`, and the watch mentions it once. It is left in the inbox for the watch that covers it.
 
 What a parked session writes is treated as untrusted: titles and notes are cleaned and capped, links must be http(s), the handoff must sit in the parked folder, and a proposed check waits for your `/watchmen approve` like any other. An entry only ever writes its own `park-…` item.
+
+## Take an item
+
+The opposite of park: pick something off the board and work on it in the session you are in, any session but the watch.
+
+```
+/watchmen take                      # the open items on the board of the watch that covers this folder
+/watchmen take ABC-123              # work on that one here
+/watchmen take ABC-123 --to ~/dev   # from a folder no watch covers, when several watches run
+```
+
+The watch is found the way park finds it: the running watch whose workspace holds this folder or its repository, else the only one running. `/watchmen take <id>` sends the item (title, kind, lane, note, link) as your first message, its fields quoted as data, and asks the session to say what it understands and what it would do first. A parked item's handoff is named as the file to read first; a parked item whose note still has its resume line prints `cd <folder> && claude --resume <id>` instead, and nothing is sent: resume it where it was.
+
+The session never writes the watch's board. It drops a take record in `…/watchmen/inbox/take/`, and the watch, on its next tick, moves the item to moving with the note `worked on in session <id> (<folder>)` (a parked item keeps its resume line). Only you can take an item, by typing the command in a terminal or through Remote Control.
 
 ## It remembers you
 
@@ -126,7 +141,7 @@ Tell the watch what to track in plain words ("keep an eye on ABC-123 and MR 42")
 
 **The watch comes to you.** When checks change, the plugin starts a turn in the watch session by itself (`$.prompt.submit`) with `◆ 2 items changed — call board_changes` (a fixed wording: the titles reach the model only as tool data): at most one wake every three minutes, changes in between batched into the next, and never while a turn runs or while you have something typed in the prompt. The watch moves each item to its lane with a one-line note. An item that lands in needs-you raises a native notification and, inside herdr, a herdr notification, so you see it from any tab; quiet changes stay in the item's note.
 
-The model's tools are `board_track`, `board_move`, `board_drop` and `board_changes`. The board is kept in `.companion/board.json` (written through a temp file and a rename), so the next watch picks it up. If the file cannot be read, it is copied to a timestamped `board.json.<time>.bak` (earlier backups are never replaced) and never written over until you fix it and `/watchmen reload`, or start over with `/watchmen reset`.
+The model's tools are `board_track`, `board_move`, `board_drop` and `board_changes`. The board is kept in `.companion/board.json` of the folder the watch started in (written through a temp file and a rename), so the next watch picks it up. That folder is fixed at start: when the watch's shell later `cd`s into a subfolder, a git worktree below it say, the board, the handoffs and `about-you.md` stay where they were. If the file cannot be read, it is copied to a timestamped `board.json.<time>.bak` (earlier backups are never replaced) and never written over until you fix it and `/watchmen reload`, or start over with `/watchmen reset`.
 
 ## What you see
 
@@ -161,7 +176,7 @@ The model's tools are `board_track`, `board_move`, `board_drop` and `board_chang
 - **The watch's own figures**, dim at the end of the band: `42% · idle 12m`, its context fill and how long since its last turn. At 75% they turn into `write the handoff`.
 - **Rotation.** The prompt cache lasts an hour; a wake after that pays to cache the whole conversation again. So when the watch has been idle 50 minutes and its conversation has grown 40k tokens past its fresh start, it writes its handoff, the conversation is cleared, and it resumes from that handoff: the next wake finds a small conversation. A turn that wrote no handoff, or a refused clear, leaves the watch as it was.
 - **Toasts**: one when an item changes, one when the watch runs long.
-- **`/watchmen`** opens the pane and prints the board (outside the watch, `/watchmen start` makes the session the watch); `/watchmen brief` prints it grouped by lane; `/watchmen band` hides or shows the band; `/watchmen track <title>` adds a todo to needs-you; `/watchmen approve <id> <hash>` lets an item's check run; `/watchmen reload` and `/watchmen reset` recover from an unreadable board.json.
+- **`/watchmen`** opens the pane and prints the board (outside the watch, `/watchmen start` makes the session the watch); `/watchmen brief` prints it grouped by lane; `/watchmen band` hides or shows the band; `/watchmen track <title>` adds a todo to needs-you; `/watchmen approve <id> <hash>` lets an item's check run; `/watchmen reload` and `/watchmen reset` recover from an unreadable board.json. In any other session, `/watchmen park` hands the session to the watch and `/watchmen take [id]` picks an item off its board.
 
 ## The board outside Claude
 
@@ -235,6 +250,7 @@ A secondary action, `pelayomendez.watchmen.toggle-board`, opens the read-only bo
 | `hooks/briefing.ts` | The same briefing, built in the module for `/watchmen start` |
 | `prompts/persona.md` | Who the watch is, and how it triages the board |
 | `hooks/board.ts` | The board's rules: tracking, checks, change detection, lanes |
+| `hooks/park.ts`, `hooks/take.ts` | Park and take: the inbox entries, their validation, coverage, the take prompt |
 | `hooks/register.tsx` | Wiring: state, timer, checks, tools, `/watchmen` and `/watchmen start`, the pane and its widget, the band, rotation |
 | `hooks/watchmen.test.ts` | `claude plugin test .` |
 | `bin/watchmen-board`, `bin/board-render.mjs` | The read-only board viewer and its pure rendering |
