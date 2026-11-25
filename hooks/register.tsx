@@ -1432,7 +1432,7 @@ export const register: Register = on => {
     }
     if (verb === 'take') {
       // Taking sends the item in as the person's own words, so only their typing takes one.
-      if (e.origin.kind !== 'composer' && e.origin.kind !== 'bridge') return { text: 'Only you can take an item: type /watchmen take yourself.' }
+      if (!STARTERS.includes(e.origin.kind)) return { text: 'Only you can take an item: type /watchmen take yourself.' }
       if (watch) return { text: 'This session keeps the watch: take items in the sessions beside it.' }
       return { text: await startTake($, rest.join(' ')) }
     }
