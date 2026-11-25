@@ -4,7 +4,7 @@ import type { Engine } from 'claude-code/testing'
 
 import type { Item } from '../types'
 import { AWAY_MS, dismissedQuestion, isDismissed, noteDismissed, lanesOf, sinceYouLooked, applyCheck, applyToBoard, approvalLines, attempt, BRIEF_PROMPT, briefHourOf, isBriefDue, localDay, dueChecks, enteredNeedsYou, glance, MASCOT_COLORS, mascotState, paintAtom, queueWake, SIDEBAR_ROW, sidebarToken, sidebarTokens, wakePrompt, move, parse, parseBoard, serialize, vitals, isRotationDue, ROTATE_IDLE_MS, rotatePrompt, summary, track } from './board'
-import { newestBackupOf, newestHandoff } from './register'
+import { newestBackupOf, newestHandoff, rememberedSessions, watchSessionsOf } from './register'
 import { briefing, pickModel, skillCandidates } from './briefing'
 import { covers, orphanLine, orphans, parentOf, repoRootOf, shortPath, checkOf, isInside, parseFrontMatter, parseInboxEntry, parseParkArgs, parkedItem, shellWord, stateDirOf } from './park'
 import { handoffOf, parseTakeArgs, parseTakeRecord, resumeOf, takenMove, takePrompt } from './take'
@@ -1740,13 +1740,42 @@ test('the footer button, only in the watch, opens the board with the keyboard an
   expect(seen.logs).toEqual([])
 })
 
-test('outside the watch the footer is left alone', async ($, on) => {
-  mock.env(on, {})
-  engine(on, {}, 10)
+test('outside the watch the footer button offers to start it, and pressing it starts the watch here', async ($, on) => {
+  mock.env(on, { HOME: '/home/u' })
+  const seen = engine(on, { '.companion/board.json': serialize([JIRA]) }, 10)
   on('ui.render', { component: 'SessionMode' }, ($, e) => h($.ui.resolve(e).Text, {}, 'default') as never)
+  seen.setSurfaces(['desktop'])
   await $.session.start(START)
   const footer = await $.ui.mount({ plugin: 'watchmen', surface: 'terminal', component: 'SessionMode', props: { modes: [] } })
-  expect(JSON.stringify(await footer.drawn())).not.toContain('watchmen')
+  const drawn = JSON.stringify(await footer.drawn())
+  expect(drawn).toContain('default')
+  expect(drawn).toContain('⚛ watchmen · start')
+  expect(seen.tools).toEqual([])
+  await footer.press({ key: 'watchmen-start' })
+  await seen.clock.settle()
+  // The same start as /watchmen start: the board tools, the widget, the briefing as the person's words.
+  expect(seen.tools).toEqual(['board_track', 'board_move', 'board_drop', 'board_changes'])
+  expect(seen.placements).toContain('widget')
+  expect(seen.asUser.length).toBe(1)
+  expect((await $.command.run(typed('start'))).text).toBe('This session already keeps the watch.')
+  const after = await $.ui.mount({ plugin: 'watchmen', surface: 'terminal', component: 'SessionMode', props: { modes: [] } })
+  expect(JSON.stringify(await after.drawn())).not.toContain('· start')
+})
+
+test('the footer start is refused when a live watch already covers this folder, and points at take', async ($, on) => {
+  mock.env(on, { HOME: '/home/u' })
+  const seen = engine(on, { [`${STATE}/heartbeat/w.json`]: JSON.stringify({ cwd: '/w', at: 0, sessionId: 'the-watch' }) }, 10)
+  on('ui.render', { component: 'SessionMode' }, ($, e) => h($.ui.resolve(e).Text, {}, 'default') as never)
+  seen.setCwd('/w/repo')
+  await $.session.start({ ...START, cwd: '/w/repo' })
+  const footer = await $.ui.mount({ plugin: 'watchmen', surface: 'terminal', component: 'SessionMode', props: { modes: [] } })
+  await footer.press({ key: 'watchmen-start' })
+  await seen.clock.settle()
+  expect(seen.tools).toEqual([])
+  expect(seen.prompts).toEqual([])
+  expect(seen.toasts.at(-1)).toContain('/w already covers this folder')
+  expect(seen.toasts.at(-1)).toContain('/watchmen take')
+  expect((await $.command.run(typed(''))).text).toContain('not keeping the watch')
 })
 
 test('an idle watch with a long conversation writes its handoff, clears, and resumes from it', async ($, on) => {
@@ -1850,6 +1879,165 @@ test('a watch an older version started, with no workspace in its state, takes th
   expect(board.length).toBeGreaterThan(0)
   expect(board.every(path => path.startsWith('/w/.companion/'))).toBe(true)
   expect(kept?.workspace).toBe('/w')
+})
+
+// ---- the watch across reloads and restarts.
+
+/**
+ * The session's state as the host holds it, kept by the test so it can be seeded with what an
+ * older version wrote, and emptied as a restart of Claude Code empties it.
+ */
+function hostState(on: On) {
+  const values = new Map<string, { value: unknown; version: number }>()
+  const name = (e: { plugin: string; key: string; id?: string }) => `${e.plugin}:${e.key}:${e.id ?? ''}`
+  on('state.get', ($$, e) => ({ value: values.get(name(e as never)) ?? { value: undefined, version: 0 } }) as never)
+  on('state.set', ($$, e) => {
+    const write = e as unknown as { plugin: string; key: string; id?: string; value: unknown; ifVersion?: number }
+    const held = values.get(name(write)) ?? { value: undefined, version: 0 }
+    if (write.ifVersion !== undefined && write.ifVersion !== held.version) return { value: { isSet: false, version: held.version } } as never
+    values.set(name(write), { value: write.value, version: held.version + 1 })
+    return { value: { isSet: true, version: held.version + 1 } } as never
+  })
+  return {
+    seed: (key: string, value: unknown) => values.set(`watchmen:${key}:`, { value, version: 1 }),
+    get: (key: string) => values.get(`watchmen:${key}:`)?.value,
+    restart: () => values.clear(),
+  }
+}
+
+const BOARD_TOOL_NAMES = ['board_track', 'board_move', 'board_drop', 'board_changes']
+
+test('watch sessions: one per workspace, refreshed hourly, newest twenty, malformed ones dropped', () => {
+  const H = 60 * MIN
+  // A then B keep /w: A is forgotten, so resuming A later never makes it the watch again.
+  const a = rememberedSessions({}, 'A', '/w', 0)!
+  expect(a).toEqual({ A: { workspace: '/w', at: 0 } })
+  expect(rememberedSessions(a, 'A', '/w', 10 * MIN)).toBeUndefined()
+  const b = rememberedSessions({ ...a, P: { workspace: '/p', at: 0 } }, 'B', '/w', MIN)!
+  expect(Object.keys(b).sort()).toEqual(['B', 'P'])
+  // A long-running watch writes its record again after an hour, so it stays among the newest.
+  expect(rememberedSessions(b, 'B', '/w', MIN + H)).toEqual({ B: { workspace: '/w', at: MIN + H }, P: { workspace: '/p', at: 0 } })
+  const many = Object.fromEntries(Array.from({ length: 25 }, (_, at) => [`s${at}`, { workspace: `/w${at}`, at }]))
+  expect(Object.keys(watchSessionsOf(many))).toHaveLength(20)
+  expect(watchSessionsOf(many).s0).toBeUndefined()
+  expect(watchSessionsOf({ x: { workspace: 'relative', at: 1 }, y: { workspace: '/ok' }, z: null, ok: { workspace: '/ok', at: 2 } })).toEqual({ ok: { workspace: '/ok', at: 2 } })
+  expect(watchSessionsOf(['nope'])).toEqual({})
+})
+
+test('two quick presses of the footer start the watch once', async ($, on) => {
+  mock.env(on, { HOME: '/home/u' })
+  const seen = engine(on, { '.companion/board.json': serialize([JIRA]) }, 10)
+  on('ui.render', { component: 'SessionMode' }, ($, e) => h($.ui.resolve(e).Text, {}, 'default') as never)
+  await $.session.start(START)
+  const footer = await $.ui.mount({ plugin: 'watchmen', surface: 'terminal', component: 'SessionMode', props: { modes: [] } })
+  await Promise.all([footer.press({ key: 'watchmen-start' }), footer.press({ key: 'watchmen-start' })])
+  await seen.clock.settle()
+  expect(seen.asUser.length).toBe(1)
+  expect(seen.tools).toEqual(BOARD_TOOL_NAMES)
+})
+
+test('a watch e77d6dc started with /watchmen start is still the watch after a hot reload, with its workspace set', async ($, on) => {
+  mock.env(on, { HOME: '/home/u' })
+  const state = hostState(on)
+  const seen = engine(on, { '.companion/board.json': serialize([JIRA]) }, 10)
+  // Exactly what e77d6dc's startWatch wrote: no workspace, no appliedTakes.
+  state.seed('watch', { handoff: undefined, briefHour: 9, isBriefingPending: true, lastBriefDay: '1970-01-01', skill: '/s/SKILL.md', startedAt: 0, warned: false })
+  state.seed('board', [JIRA])
+  // The reload: register and session.start run again; WATCHMEN is not set for a typed start.
+  await $.session.start(START)
+  await seen.clock.settle()
+  expect(state.get('watch')).toMatchObject({ workspace: '/w', skill: '/s/SKILL.md', startedAt: 0 })
+  expect(seen.commands.at(-1)).toContain('The watch')
+  expect(seen.tools).toEqual(BOARD_TOOL_NAMES)
+  expect((await $.command.run(typed('start'))).text).toBe('This session already keeps the watch.')
+  expect((await $.tool.call({ tool: 'mcp__watchmen__board_changes' })).isError).toBeFalsy()
+  // No second briefing or discovery for a watch that was already running.
+  expect(seen.prompts).toEqual([])
+})
+
+test('a watch started by this version survives a hot reload', async ($, on) => {
+  mock.env(on, { HOME: '/home/u' })
+  const state = hostState(on)
+  const seen = engine(on, { '.companion/board.json': serialize([JIRA]) }, 10)
+  await $.session.start(START)
+  await $.command.run(typed('start'))
+  await seen.clock.settle()
+  const started = state.get('watch')
+  expect(started).toMatchObject({ workspace: '/w' })
+  seen.setCwd('/w/sub')
+  seen.tools.length = 0
+  const prompts = seen.prompts.length
+  await $.session.start({ ...START, cwd: '/w/sub' })
+  await seen.clock.settle()
+  expect(state.get('watch')).toMatchObject({ workspace: '/w', startedAt: (started as { startedAt: number }).startedAt })
+  expect(seen.tools).toEqual(BOARD_TOOL_NAMES)
+  expect(seen.prompts.length).toBe(prompts)
+  expect((await $.command.run(typed('start'))).text).toBe('This session already keeps the watch.')
+})
+
+test('a restart of Claude Code empties the state; the resumed session is the watch again, of the same workspace', async ($, on) => {
+  mock.env(on, { HOME: '/home/u' })
+  const state = hostState(on)
+  const seen = engine(on, { '.companion/board.json': serialize([JIRA]) }, 10)
+  await $.session.start(START)
+  await $.command.run(typed('start'))
+  await seen.clock.settle()
+  const prompts = seen.prompts.length
+  // Claude Code updates and resumes the session: nothing in state, the shell somewhere else.
+  state.restart()
+  seen.setCwd('/w/sub')
+  seen.tools.length = 0
+  await seen.clock.advance(15_000)
+  await $.session.start({ ...START, cwd: '/w/sub' })
+  await seen.clock.settle()
+  expect(state.get('watch')).toMatchObject({ workspace: '/w' })
+  expect(state.get('board')).toEqual([JIRA])
+  expect(seen.tools).toEqual(BOARD_TOOL_NAMES)
+  expect(seen.commands.at(-1)).toContain('The watch')
+  // Neither the briefing nor discovery goes in again: the conversation already has them.
+  expect(seen.prompts.length).toBe(prompts)
+  expect((await $.command.run(typed('start'))).text).toBe('This session already keeps the watch.')
+  // Its heartbeat goes on naming the workspace, and this session.
+  await seen.clock.advance(15_000)
+  const heartbeat = Object.keys(seen.writes).find(path => path.startsWith(`${STATE}/heartbeat/`)) ?? ''
+  expect(JSON.parse(seen.writes[heartbeat] ?? '{}')).toMatchObject({ cwd: '/w', sessionId: 'abc12345-6789-session' })
+})
+
+test('a resumed session is not the watch again when another session has kept that workspace since', async ($, on) => {
+  mock.env(on, { HOME: '/home/u' })
+  const state = hostState(on)
+  const seen = engine(on, { '.companion/board.json': serialize([JIRA]) }, 10)
+  await $.session.start(START)
+  await $.command.run(typed('start'))
+  await seen.clock.settle()
+  state.restart()
+  // Meanwhile another session started the watch in /w: its heartbeat is fresh and names it.
+  const heartbeat = Object.keys(seen.writes).find(path => path.startsWith(`${STATE}/heartbeat/`)) ?? ''
+  const { at } = JSON.parse(seen.writes[heartbeat] ?? '{}') as { at: number }
+  seen.writes[heartbeat] = JSON.stringify({ cwd: '/w', at, sessionId: 'another-session' })
+  seen.tools.length = 0
+  await $.session.start(START)
+  await seen.clock.settle()
+  expect(state.get('watch')).toBeUndefined()
+  expect(seen.tools).toEqual([])
+  expect(seen.commands.at(-1)).toContain('Start the watch')
+  // Forgotten: once that heartbeat goes stale, a later restart still does not restore it.
+  seen.writes[heartbeat] = JSON.stringify({ cwd: '/w', at: -10 * MIN, sessionId: 'another-session' })
+  await $.session.start(START)
+  await seen.clock.settle()
+  expect(state.get('watch')).toBeUndefined()
+})
+
+test('a session that never kept the watch is not made one by a restart', async ($, on) => {
+  mock.env(on, { HOME: '/home/u' })
+  const state = hostState(on)
+  const seen = engine(on, { '.companion/board.json': serialize([JIRA]) }, 10)
+  await $.session.start(START)
+  state.restart()
+  await $.session.start(START)
+  await seen.clock.settle()
+  expect(state.get('watch')).toBeUndefined()
+  expect(seen.tools).toEqual([])
 })
 
 // ---- take: the opposite of park.

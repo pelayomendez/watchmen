@@ -130,6 +130,41 @@ const VITALS = { plugin: 'watchmen', key: 'vitals' } as const
 const PARK = { plugin: 'watchmen', key: 'park' } as const
 // How fresh a watch's heartbeat must be for a parked session to say the watch has it.
 const HEARTBEAT_MS = 60_000
+// The sessions that keep a watch, by session id, in the store. $.state lives as long as the
+// process: when Claude Code restarts (an update, a crash) and the session is resumed, the state is
+// empty, and this is how the session finds out it was the watch, and of which workspace.
+const WATCH_SESSIONS = 'watch-sessions'
+const WATCH_SESSIONS_KEPT = 20
+type WatchSessions = Record<string, { workspace: string; at: number }>
+
+/** The kept watch sessions, newest first, cut to WATCH_SESSIONS_KEPT; anything malformed dropped. */
+export function watchSessionsOf(kept: unknown): WatchSessions {
+  if (!kept || typeof kept !== 'object' || Array.isArray(kept)) return {}
+  const valid = Object.entries(kept as Record<string, unknown>).filter(
+    (one): one is [string, { workspace: string; at: number }] => {
+      const value = one[1] as { workspace?: unknown; at?: unknown } | null
+      return !!value && typeof value.workspace === 'string' && value.workspace.startsWith('/') && typeof value.at === 'number'
+    },
+  )
+  return Object.fromEntries(valid.sort((a, b) => b[1].at - a[1].at).slice(0, WATCH_SESSIONS_KEPT))
+}
+
+// How old a session's record may grow before the watch writes it again, so a long-running watch
+// stays among the newest kept.
+const WATCH_SESSION_REFRESH_MS = 60 * 60_000
+
+/**
+ * The kept watch sessions with `id` keeping `workspace` now: one session per workspace, so a session
+ * an older watch ran in (before a newer one took the folder, or before a /clear gave it a new id)
+ * is never made the watch again. Undefined when nothing needs writing.
+ */
+export function rememberedSessions(kept: WatchSessions, id: string, workspace: string, now: number): WatchSessions | undefined {
+  const held = kept[id]
+  const others = Object.entries(kept).filter(([key, value]) => key !== id && value.workspace === workspace)
+  if (held?.workspace === workspace && now - held.at < WATCH_SESSION_REFRESH_MS && others.length === 0) return undefined
+  const rest = Object.fromEntries(Object.entries(kept).filter(([key, value]) => key !== id && value.workspace !== workspace))
+  return watchSessionsOf({ ...rest, [id]: { workspace, at: now } })
+}
 const board = atom({ plugin: 'watchmen', key: 'board' } as const, [])
 const vitalsAtom = atom({ plugin: 'watchmen', key: 'vitals' } as const, {} as Vitals)
 
@@ -376,6 +411,41 @@ let isPaneOffered = false
 
 async function isWatch($: EngineInterface) {
   return (await $.state.get(WATCH)).value !== undefined
+}
+
+/** Records that this session keeps the watch of `workspace`, unless the store already says so. */
+async function rememberWatch($: EngineInterface, workspace: string): Promise<void> {
+  const next = rememberedSessions(watchSessionsOf(await $.store.get(WATCH_SESSIONS)), await $.session.id(), workspace, await $.clock.now())
+  if (next) await $.store.set(WATCH_SESSIONS, next)
+}
+
+/** The workspace this session kept the watch of before the process restarted, if it did. */
+async function rememberedWatch($: EngineInterface): Promise<string | undefined> {
+  const kept = watchSessionsOf(await $.store.get(WATCH_SESSIONS).catch(() => undefined))
+  return kept[await $.session.id()]?.workspace
+}
+
+/** Forgets this session as a watch: another session has taken its workspace. */
+async function forgetWatch($: EngineInterface): Promise<void> {
+  const id = await $.session.id()
+  const kept = watchSessionsOf(await $.store.get(WATCH_SESSIONS))
+  if (!(id in kept)) return
+  const { [id]: _, ...rest } = kept
+  await $.store.set(WATCH_SESSIONS, rest)
+}
+
+/** The session whose heartbeat for `workspace` is fresh, when it names one that is not this one. */
+async function otherWatchOf($: EngineInterface, workspace: string): Promise<boolean> {
+  const dir = await stateDir($)
+  if (!dir) return false
+  try {
+    const beat = JSON.parse(String(await $.fs.read(await heartbeatFile(dir, workspace)))) as { at?: unknown; sessionId?: unknown }
+    // A beat with no session id came from an older version: most likely this session's own.
+    if (typeof beat.at !== 'number' || (await $.clock.now()) - beat.at >= HEARTBEAT_MS || typeof beat.sessionId !== 'string') return false
+    return beat.sessionId !== (await $.session.id())
+  } catch {
+    return false
+  }
 }
 
 /** Marks an item's check as waiting for approval of the command with this short hash, or clears it. */
@@ -654,6 +724,7 @@ async function tick($: EngineInterface) {
   await takeInbox($, now, workspace).catch(error => $.ui.log(`watchmen: could not read the park inbox: ${String(error)}`))
   await takeTakes($, workspace).catch(error => $.ui.log(`watchmen: could not read the take inbox: ${String(error)}`))
   await beat($, now, workspace).catch(() => undefined)
+  await rememberWatch($, workspace).catch(() => undefined)
   if (!watch.rotation) await maybeWake($, now)
   if (!watch.rotation) await maybeBrief($, now)
   const { context } = await $.session.usage()
@@ -716,7 +787,12 @@ let isTicking = false
  * registered, and the check timer running. The launcher's session.start and /watchmen start both
  * come here. `skill` is where the ambient-companion skill was found, if it was.
  */
-async function startWatch($: EngineInterface, skill: string | undefined, isBriefingPending = false): Promise<Watch> {
+async function startWatch(
+  $: EngineInterface,
+  skill: string | undefined,
+  isBriefingPending = false,
+  restored?: string,
+): Promise<Watch> {
   const held = (await $.state.get(WATCH)).value
   // The command and the tools go in first and the watch is written to state last, so a start that
   // fails part way leaves no watch behind: /watchmen still offers start, and a retry runs it all.
@@ -735,8 +811,9 @@ async function startWatch($: EngineInterface, skill: string | undefined, isBrief
     watch = (await $.state.get(WATCH)).value ?? { ...watch, workspace }
   }
   if (!watch) {
-    // The workspace is fixed here, absolute, and every .companion path is resolved from it.
-    const workspace = await $.session.cwd()
+    // The workspace is fixed here, absolute, and every .companion path is resolved from it. A watch
+    // found again after a restart keeps the one it had, wherever the resumed session starts.
+    const workspace = restored ?? (await $.session.cwd())
     const boardError = await loadBoard($, workspace)
     const startedAt = await $.clock.now()
     const briefHour = briefHourOf((await $.env.get('WATCHMEN_BRIEF_HOUR')) || undefined)
@@ -756,6 +833,7 @@ async function startWatch($: EngineInterface, skill: string | undefined, isBrief
     } satisfies Watch
     await $.state.set(WATCH, watch)
   }
+  if (watch.workspace) await rememberWatch($, watch.workspace).catch(error => $.ui.log(`watchmen: could not record the watch: ${String(error)}`))
   // Versions before 0.3 pinned a status line; a reload would leave it on screen, drawn as a warning.
   $.ui.status(undefined)
   if (!isTicking) {
@@ -1087,7 +1165,11 @@ async function completePark($: EngineInterface) {
 async function beat($: EngineInterface, now: number, workspace: string) {
   const dir = await stateDir($)
   if (!dir) return
-  await $.fs.write(`${dir}/heartbeat/${(await sha256(workspace)).slice(0, 16)}.json`, JSON.stringify({ cwd: workspace, at: now }))
+  await $.fs.write(await heartbeatFile(dir, workspace), JSON.stringify({ cwd: workspace, at: now, sessionId: await $.session.id() }))
+}
+
+async function heartbeatFile(dir: string, workspace: string): Promise<string> {
+  return `${dir}/heartbeat/${(await sha256(workspace)).slice(0, 16)}.json`
 }
 
 /**
@@ -1279,21 +1361,103 @@ async function startBriefing($: EngineInterface, watch: Watch): Promise<string> 
   return briefing({ persona: String(persona), skill: watch.skill, handoff: watch.handoff, taskModel, workspace: watch.workspace })
 }
 
+/**
+ * Makes this session the watch, from /watchmen start or the footer button: the person asked for it
+ * either way. Answers what to tell them.
+ */
+async function startHere($: EngineInterface): Promise<string> {
+  let started: Watch
+  try {
+    started = await startWatch($, await findSkill($), true)
+  } catch (error) {
+    return `The watch could not start: ${String(error)}. Type /watchmen start to try again.`
+  }
+  // Less board, more conversation: on the desktop app the pane starts as a small widget; on any
+  // other surface (a terminal, VS Code, a phone) it is not opened at all: the band shows the
+  // counts, /watchmen opens it, and the fullscreen layout still docks it by itself.
+  const surfaces: readonly string[] = await $.session.surfaces().catch(() => [])
+  if (surfaces.includes('desktop')) {
+    await $.ui.open({ id: PANE, title: PANE_TITLE, placement: 'widget' }).catch(() => undefined)
+  }
+  // The briefing is the watch's first message. A command.run hook cannot submit a prompt (it
+  // would wait on the turn the hook holds), so a timer sends it once the command has answered;
+  // the engine starts that turn when the session is idle, the board tools registered above in it.
+  // The person typed /watchmen start or pressed the button, so the model reads the briefing as
+  // their own words. Discovery runs in that timer after it, and what it finds goes in as the
+  // plugin's own message, never as the person's words: its titles come from other people.
+  const text = await startBriefing($, started)
+  $.clock.after(0, async () => {
+    // The morning brief waits for this one; a failed briefing does not hold it back for good.
+    void $.prompt
+      .submit({ text, asUser: true })
+      .catch(error => $.ui.log(`watchmen: the briefing was not sent: ${String(error)}`))
+      .finally(() => patchWatch($, held => ({ ...held, isBriefingPending: undefined })))
+    const found = await discover($).catch(() => undefined)
+    if (found) void $.prompt.submit({ text: found }).catch(error => $.ui.log(`watchmen: what discovery found was not sent: ${String(error)}`))
+  })
+  return 'This session keeps the watch now. The briefing goes in as the first message.'
+}
+
+/**
+ * The footer button outside the watch: start the watch here, unless a live watch already covers
+ * this folder (the rule park and take go by), which then keeps it, and take is the way in.
+ */
+// A start from the button under way: a second press while it runs starts nothing.
+let isButtonStarting = false
+
+async function startFromButton($: EngineInterface): Promise<void> {
+  if (await isWatch($)) return showBoard($)
+  if (isButtonStarting) return
+  isButtonStarting = true
+  try {
+    await startFromButtonOnce($)
+  } finally {
+    isButtonStarting = false
+  }
+}
+
+async function startFromButtonOnce($: EngineInterface): Promise<void> {
+  const dir = await stateDir($)
+  if (dir) {
+    const cwd = await $.session.cwd()
+    const live = [...new Set(await liveWorkspaces($, dir, await $.clock.now()))]
+    const covering = coveringOf(live, { cwd, ...optional('repoRoot', await repoRootAt($, cwd)) })
+    if (covering !== undefined) {
+      const home = (await $.env.get('HOME')) || undefined
+      $.ui.toast(`The watch in ${shortPath(covering, home)} already covers this folder. Type /watchmen take to work on one of its items here.`, { timeoutMs: 10_000 })
+      return
+    }
+  }
+  const answer = await startHere($)
+  if (!(await isWatch($))) $.ui.toast(answer, { timeoutMs: 10_000 })
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const result = await next(e)
     // The flag is read once and kept in the session's state, then cleared from the environment so
     // a claude started from this session's shell is not taken for the watch. A hot reload runs
     // session.start again and finds the watch, and the board, in state.
+    // A process restart (an update, a crash) empties the state: a resumed session that kept the
+    // watch finds it again in the store, unless another session has taken its workspace since.
     const isLaunched = (await $.env.get('WATCHMEN')) === '1'
+    let restored: string | undefined
     if (!(await isWatch($)) && !isLaunched) {
-      await $.command.register(COMMAND_IDLE)
-      return result
+      restored = await rememberedWatch($)
+      if (restored !== undefined && (await otherWatchOf($, restored))) {
+        await forgetWatch($).catch(() => undefined)
+        restored = undefined
+      }
+      if (restored === undefined) {
+        await $.command.register(COMMAND_IDLE)
+        return result
+      }
     }
-    const isNew = !(await isWatch($))
-    await startWatch($, (await $.env.get('WATCHMEN_SKILL')) || undefined)
+    const isNew = !(await isWatch($)) && restored === undefined
+    const skill = restored === undefined ? (await $.env.get('WATCHMEN_SKILL')) || undefined : await findSkill($)
+    await startWatch($, skill, false, restored)
     // The launcher's briefing is a system prompt built in bash; what discovery finds goes in as a
-    // message of its own, once the session is up.
+    // message of its own, once the session is up. A resumed watch has had both already.
     if (isNew) {
       $.clock.after(0, async () => {
         const found = await discover($).catch(() => undefined)
@@ -1394,36 +1558,7 @@ export const register: Register = on => {
         return { text: 'This session already keeps the watch.' }
       }
       if (!STARTERS.includes(e.origin.kind)) return { text: 'Only you can start the watch: type /watchmen start yourself.' }
-      let started: Watch
-      try {
-        started = await startWatch($, await findSkill($), true)
-      } catch (error) {
-        return { text: `The watch could not start: ${String(error)}. Type /watchmen start to try again.` }
-      }
-      // Less board, more conversation: on the desktop app the pane starts as a small widget; on any
-      // other surface (a terminal, VS Code, a phone) it is not opened at all: the band shows the
-      // counts, /watchmen opens it, and the fullscreen layout still docks it by itself.
-      const surfaces: readonly string[] = await $.session.surfaces().catch(() => [])
-      if (surfaces.includes('desktop')) {
-        await $.ui.open({ id: PANE, title: PANE_TITLE, placement: 'widget' }).catch(() => undefined)
-      }
-      // The briefing is the watch's first message. A command.run hook cannot submit a prompt (it
-      // would wait on the turn the hook holds), so a timer sends it once the command has answered;
-      // the engine starts that turn when the session is idle, the board tools registered above in it.
-      // The person typed /watchmen start, so the model reads the briefing as their own words.
-      // Discovery runs in that timer after it, and what it finds goes in as the plugin's own message,
-      // never as the person's words: its titles come from other people.
-      const text = await startBriefing($, started)
-      $.clock.after(0, async () => {
-        // The morning brief waits for this one; a failed briefing does not hold it back for good.
-        void $.prompt
-          .submit({ text, asUser: true })
-          .catch(error => $.ui.log(`watchmen: the briefing was not sent: ${String(error)}`))
-          .finally(() => patchWatch($, held => ({ ...held, isBriefingPending: undefined })))
-        const found = await discover($).catch(() => undefined)
-        if (found) void $.prompt.submit({ text: found }).catch(error => $.ui.log(`watchmen: what discovery found was not sent: ${String(error)}`))
-      })
-      return { text: 'This session keeps the watch now. The briefing goes in as the first message.' }
+      return { text: await startHere($) }
     }
     if (verb === 'park') {
       if (!STARTERS.includes(e.origin.kind)) return { text: 'Only you can park a session: type /watchmen park yourself.' }
@@ -1512,12 +1647,23 @@ export const register: Register = on => {
     return { text: lines.join('\n') }
   })
 
-  // The footer button, in the watch session only: the way into the board, with a red count when
-  // something needs the person.
+  // The footer button. In the watch it is the way into the board, with a red count when
+  // something needs the person; in any other session it starts the watch there, as /watchmen start.
   on('ui.render', { component: 'SessionMode' }, async ($, e, next) => {
-    if (!(await isWatch($))) return next(e)
     const { Box, Button, Text } = $.ui.resolve(e)
     const modes = await next(e)
+    if (!(await isWatch($))) {
+      return (
+        <Box gap={1}>
+          {modes}
+          <Button key="watchmen-start" label="start watchmen" plain onPress={() => void startFromButton($).catch(error => $.ui.log(`watchmen: the watch did not start: ${String(error)}`))}>
+            <Text color={BLUE} dimColor>
+              {'⚛ watchmen · start'}
+            </Text>
+          </Button>
+        </Box>
+      )
+    }
     const needs = (await read($, board)).filter(one => one.lane === 'needs-you').length
     return (
       <Box gap={1}>
